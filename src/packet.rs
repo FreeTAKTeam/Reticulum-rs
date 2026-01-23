@@ -3,13 +3,14 @@ use core::fmt;
 use sha2::Digest;
 
 use crate::buffer::StaticBuffer;
-use crate::crypt::fernet::FERNET_OVERHEAD_SIZE;
+use crate::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use crate::error::RnsError;
 use crate::hash::AddressHash;
 use crate::hash::Hash;
 
 pub const PACKET_MDU: usize = 2048usize;
-pub const LXMF_MAX_PAYLOAD: usize = PACKET_MDU - FERNET_OVERHEAD_SIZE;
+pub const LXMF_MAX_PAYLOAD: usize =
+    PACKET_MDU - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE;
 pub const PACKET_IFAC_MAX_LENGTH: usize = 64usize;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]

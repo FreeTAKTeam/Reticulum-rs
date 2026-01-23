@@ -129,7 +129,7 @@ struct TransportHandler {
     fixed_dest_path_requests: AddressHash,
 
     cancel: CancellationToken,
-    receipt_handler: Option<Box<dyn ReceiptHandler>>,
+    receipt_handler: Option<Arc<dyn ReceiptHandler>>,
 }
 
 pub struct Transport {
@@ -290,20 +290,32 @@ impl Transport {
     }
 
     pub async fn set_receipt_handler(&mut self, handler: Box<dyn ReceiptHandler>) {
-        self.handler.lock().await.receipt_handler = Some(handler);
+        self.handler.lock().await.receipt_handler = Some(Arc::from(handler));
     }
 
     pub fn emit_receipt_for_test(&self, receipt: DeliveryReceipt) {
-        if let Ok(handler) = self.handler.try_lock() {
-            if let Some(handler) = &handler.receipt_handler {
-                handler.on_receipt(&receipt);
-            }
+        let receipt_handler = self
+            .handler
+            .try_lock()
+            .ok()
+            .and_then(|handler| handler.receipt_handler.clone());
+
+        if let Some(handler) = receipt_handler {
+            handler.on_receipt(&receipt);
         }
     }
 
     pub async fn handle_inbound_for_test(&self, packet: Packet) {
-        let mut handler = self.handler.lock().await;
-        handle_inbound_packet_for_test(&packet, &mut handler);
+        let (receipt, receipt_handler) = {
+            let mut handler = self.handler.lock().await;
+            let receipt = handle_inbound_packet_for_test(&packet, &mut handler);
+            let receipt_handler = handler.receipt_handler.clone();
+            (receipt, receipt_handler)
+        };
+
+        if let (Some(receipt), Some(handler)) = (receipt, receipt_handler) {
+            handler.on_receipt(&receipt);
+        }
     }
 
     pub async fn send_broadcast(&self, packet: Packet, from_iface: Option<AddressHash>) {
@@ -571,21 +583,27 @@ impl TransportHandler {
     }
 }
 
-async fn handle_proof<'a>(packet: &Packet, mut handler: MutexGuard<'a, TransportHandler>) {
-    log::trace!(
-        "tp({}): handle proof for {}",
-        handler.config.name,
-        packet.destination
-    );
+async fn handle_proof(packet: Packet, handler: Arc<Mutex<TransportHandler>>) {
+    let receipt = DeliveryReceipt::new(packet.hash().to_bytes());
+    let receipt_handler = {
+        let handler = handler.lock().await;
+        log::trace!(
+            "tp({}): handle proof for {}",
+            handler.config.name,
+            packet.destination
+        );
+        handler.receipt_handler.clone()
+    };
 
-    if let Some(receipt_handler) = &handler.receipt_handler {
-        let receipt = DeliveryReceipt::new(packet.hash().to_bytes());
+    if let Some(receipt_handler) = receipt_handler {
         receipt_handler.on_receipt(&receipt);
     }
 
+    let mut handler = handler.lock().await;
+
     for link in handler.out_links.values() {
         let mut link = link.lock().await;
-        match link.handle_packet(packet) {
+        match link.handle_packet(&packet) {
             LinkHandleResult::Activated => {
                 let rtt_packet = link.create_rtt();
                 handler.send_packet(rtt_packet).await;
@@ -594,26 +612,27 @@ async fn handle_proof<'a>(packet: &Packet, mut handler: MutexGuard<'a, Transport
         }
     }
 
-    let maybe_packet = handler.link_table.handle_proof(packet);
+    let maybe_packet = handler.link_table.handle_proof(&packet);
 
     if let Some((packet, iface)) = maybe_packet {
-        handler.send(TxMessage {
-            tx_type: TxMessageType::Direct(iface),
-            packet
-        })
-        .await;
+        handler
+            .send(TxMessage {
+                tx_type: TxMessageType::Direct(iface),
+                packet,
+            })
+            .await;
     }
 }
 
-fn handle_inbound_packet_for_test(packet: &Packet, handler: &mut MutexGuard<'_, TransportHandler>) {
+fn handle_inbound_packet_for_test(
+    packet: &Packet,
+    _handler: &mut MutexGuard<'_, TransportHandler>
+) -> Option<DeliveryReceipt> {
     match packet.header.packet_type {
         PacketType::Proof => {
-            let receipt = DeliveryReceipt::new(packet.hash().to_bytes());
-            if let Some(handler) = &handler.receipt_handler {
-                handler.on_receipt(&receipt);
-            }
+            Some(DeliveryReceipt::new(packet.hash().to_bytes()))
         }
-        _ => {}
+        _ => None
     }
 }
 
@@ -1075,20 +1094,20 @@ fn create_retransmit_packet(packet: &Packet) -> Packet {
 
 
 async fn manage_transport(
-    handler: Arc<Mutex<TransportHandler>>,
+    handler_arc: Arc<Mutex<TransportHandler>>,
     rx_receiver: Arc<Mutex<InterfaceRxReceiver>>,
     iface_messages_tx: broadcast::Sender<RxMessage>,
 ) {
-    let cancel = handler.lock().await.cancel.clone();
-    let retransmit = handler.lock().await.config.retransmit;
+    let cancel = handler_arc.lock().await.cancel.clone();
+    let retransmit = handler_arc.lock().await.config.retransmit;
 
     let _packet_task = {
-        let handler = handler.clone();
+        let handler_arc = handler_arc.clone();
         let cancel = cancel.clone();
 
         log::trace!(
             "tp({}): start packet task",
-            handler.lock().await.config.name
+            handler_arc.lock().await.config.name
         );
 
         tokio::spawn(async move {
@@ -1108,7 +1127,7 @@ async fn manage_transport(
 
                         let packet = message.packet;
 
-                        let mut handler = handler.lock().await;
+                        let mut handler = handler_arc.lock().await;
 
                         if PACKET_TRACE {
                             log::debug!("tp: << rx({}) = {} {}", message.address, packet, packet.hash());
@@ -1150,7 +1169,10 @@ async fn manage_transport(
                                 message.address,
                                 handler
                             ).await,
-                            PacketType::Proof => handle_proof(&packet, handler).await,
+                            PacketType::Proof => {
+                                drop(handler);
+                                handle_proof(packet, handler_arc.clone()).await;
+                            }
                             PacketType::Data => handle_data(&packet, handler).await,
                         }
                     }
@@ -1160,7 +1182,7 @@ async fn manage_transport(
     };
 
     {
-        let handler = handler.clone();
+        let handler = handler_arc.clone();
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
@@ -1182,7 +1204,7 @@ async fn manage_transport(
     }
 
     {
-        let handler = handler.clone();
+        let handler = handler_arc.clone();
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
@@ -1204,7 +1226,7 @@ async fn manage_transport(
     }
 
     {
-        let handler = handler.clone();
+        let handler = handler_arc.clone();
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
@@ -1226,7 +1248,7 @@ async fn manage_transport(
     }
 
     {
-        let handler = handler.clone();
+        let handler = handler_arc.clone();
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
@@ -1256,7 +1278,7 @@ async fn manage_transport(
     }
 
     if retransmit {
-        let handler = handler.clone();
+        let handler = handler_arc.clone();
         let cancel = cancel.clone();
 
         tokio::spawn(async move {
