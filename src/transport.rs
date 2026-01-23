@@ -103,10 +103,15 @@ pub struct AnnounceEvent {
     pub app_data: PacketDataBuffer,
 }
 
+pub trait AnnounceHandler: Send + Sync {
+    fn on_announce(&self, event: &AnnounceEvent);
+}
+
 struct TransportHandler {
     config: TransportConfig,
     iface_manager: Arc<Mutex<InterfaceManager>>,
     announce_tx: broadcast::Sender<AnnounceEvent>,
+    announce_handlers: Vec<Arc<dyn AnnounceHandler>>,
 
     path_table: PathTable,
     announce_table: AnnounceTable,
@@ -211,6 +216,7 @@ impl Transport {
             packet_cache: Mutex::new(PacketCache::new()),
             path_requests,
             announce_tx,
+            announce_handlers: Vec::new(),
             link_in_event_tx: link_in_event_tx.clone(),
             received_data_tx: received_data_tx.clone(),
             fixed_dest_path_requests: path_request_dest,
@@ -267,6 +273,14 @@ impl Transport {
         self.handler.lock().await.announce_tx.subscribe()
     }
 
+    pub async fn register_announce_handler(&mut self, handler: Box<dyn AnnounceHandler>) {
+        self.handler
+            .lock()
+            .await
+            .announce_handlers
+            .push(Arc::from(handler));
+    }
+
     pub async fn send_packet(&self, packet: Packet) {
         self.handler.lock().await.send_packet(packet).await;
     }
@@ -316,6 +330,10 @@ impl Transport {
         if let (Some(receipt), Some(handler)) = (receipt, receipt_handler) {
             handler.on_receipt(&receipt);
         }
+    }
+
+    pub async fn handle_announce_for_test(&self, packet: Packet, iface: AddressHash) {
+        handle_announce(&packet, self.handler.lock().await, iface).await;
     }
 
     pub async fn send_broadcast(&self, packet: Packet, from_iface: Option<AddressHash>) {
@@ -810,10 +828,16 @@ async fn handle_announce<'a>(
             }
         }
 
-        let _ = handler.announce_tx.send(AnnounceEvent {
+        let event = AnnounceEvent {
             destination,
             app_data: PacketDataBuffer::new_from_slice(&app_data),
-        });
+        };
+
+        for announce_handler in handler.announce_handlers.iter() {
+            announce_handler.on_announce(&event);
+        }
+
+        let _ = handler.announce_tx.send(event);
     }
 }
 
