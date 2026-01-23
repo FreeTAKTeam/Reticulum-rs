@@ -3,6 +3,7 @@ use core::convert::From;
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::BlockDecryptMut;
+use aes::cipher::BlockSizeUser;
 use aes::cipher::Key;
 use aes::cipher::Unsigned;
 use cbc::cipher::BlockEncryptMut;
@@ -28,7 +29,9 @@ type HmacSha256 = Hmac<Sha256>;
 const HMAC_OUT_SIZE: usize = <<HmacSha256 as OutputSizeUser>::OutputSize as Unsigned>::USIZE;
 const AES_KEY_SIZE: usize = <<AesAlgo as KeySizeUser>::KeySize as Unsigned>::USIZE;
 const IV_KEY_SIZE: usize = <<AesCbcEnc as IvSizeUser>::IvSize as Unsigned>::USIZE;
-const FERNET_OVERHEAD_SIZE: usize = IV_KEY_SIZE + HMAC_OUT_SIZE;
+const AES_BLOCK_SIZE: usize = <<AesAlgo as BlockSizeUser>::BlockSize as Unsigned>::USIZE;
+pub const FERNET_OVERHEAD_SIZE: usize = IV_KEY_SIZE + HMAC_OUT_SIZE;
+pub const FERNET_MAX_PADDING_SIZE: usize = AES_BLOCK_SIZE;
 
 pub struct PlainText<'a>(&'a [u8]);
 pub struct VerifiedToken<'a>(&'a [u8]);
@@ -62,6 +65,12 @@ impl<'a> From<&'a str> for PlainText<'a> {
 impl<'a> From<&'a [u8]> for PlainText<'a> {
     fn from(item: &'a [u8]) -> Self {
         Self { 0: item }
+    }
+}
+
+impl<'a> PlainText<'a> {
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.0
     }
 }
 

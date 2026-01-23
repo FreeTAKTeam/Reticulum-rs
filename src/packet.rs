@@ -3,10 +3,14 @@ use core::fmt;
 use sha2::Digest;
 
 use crate::buffer::StaticBuffer;
+use crate::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+use crate::error::RnsError;
 use crate::hash::AddressHash;
 use crate::hash::Hash;
 
 pub const PACKET_MDU: usize = 2048usize;
+pub const LXMF_MAX_PAYLOAD: usize =
+    PACKET_MDU - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE;
 pub const PACKET_IFAC_MAX_LENGTH: usize = 64usize;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -248,6 +252,8 @@ pub struct Packet {
 }
 
 impl Packet {
+    pub const LXMF_MAX_PAYLOAD: usize = LXMF_MAX_PAYLOAD;
+
     pub fn hash(&self) -> Hash {
         Hash::new(
             Hash::generator()
@@ -258,6 +264,16 @@ impl Packet {
                 .finalize()
                 .into(),
         )
+    }
+
+    pub fn fragment_for_lxmf(data: &[u8]) -> Result<Vec<Packet>, RnsError> {
+        let mut out = Vec::new();
+        for chunk in data.chunks(Self::LXMF_MAX_PAYLOAD) {
+            let mut packet = Packet::default();
+            packet.data = StaticBuffer::new_from_slice(chunk);
+            out.push(packet);
+        }
+        Ok(out)
     }
 }
 
