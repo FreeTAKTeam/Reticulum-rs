@@ -332,10 +332,6 @@ impl Transport {
         }
     }
 
-    pub async fn handle_announce_for_test(&self, packet: Packet, iface: AddressHash) {
-        handle_announce(&packet, self.handler.lock().await, iface).await;
-    }
-
     pub async fn send_broadcast(&self, packet: Packet, from_iface: Option<AddressHash>) {
         self.handler
             .lock()
