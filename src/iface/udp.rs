@@ -163,3 +163,11 @@ impl Interface for UdpInterface {
         2048
     }
 }
+
+pub fn encode_frame(data: &[u8]) -> Result<Vec<u8>, RnsError> {
+    Ok(data.to_vec())
+}
+
+pub fn decode_frame(frame: &[u8]) -> Result<Vec<u8>, RnsError> {
+    Ok(frame.to_vec())
+}
