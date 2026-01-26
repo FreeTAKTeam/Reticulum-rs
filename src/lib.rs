@@ -20,5 +20,5 @@ pub use crate::identity::{lxmf_sign, lxmf_verify};
 pub use crate::packet::{LXMF_MAX_PAYLOAD, Packet};
 pub use crate::transport::{DeliveryReceipt, ReceiptHandler};
 
-mod utils;
+pub mod utils;
 mod serde;
