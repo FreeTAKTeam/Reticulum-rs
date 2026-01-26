@@ -18,6 +18,15 @@ pub fn create_hash(data: &[u8], out: &mut [u8]) {
     );
 }
 
+pub fn address_hash(data: &[u8]) -> [u8; ADDRESS_HASH_SIZE] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let out = hasher.finalize();
+    let mut truncated = [0u8; ADDRESS_HASH_SIZE];
+    truncated.copy_from_slice(&out[..ADDRESS_HASH_SIZE]);
+    truncated
+}
+
 pub fn lxmf_address_hash(hash: &Hash) -> AddressHash {
     AddressHash::new_from_hash(hash)
 }
