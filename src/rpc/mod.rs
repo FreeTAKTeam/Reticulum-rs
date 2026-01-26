@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
 use crate::storage::messages::MessagesStore;
+use tokio::sync::broadcast;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct RpcRequest {
@@ -28,6 +29,13 @@ pub struct RpcError {
 pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
+    events: broadcast::Sender<RpcEvent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct RpcEvent {
+    pub event_type: String,
+    pub payload: JsonValue,
 }
 
 #[derive(Debug, Deserialize)]
@@ -41,9 +49,11 @@ struct SendMessageParams {
 impl RpcDaemon {
     pub fn test_instance() -> Self {
         let store = MessagesStore::in_memory().expect("in-memory store");
+        let (events, _rx) = broadcast::channel(64);
         Self {
             store,
             identity_hash: "test-identity".into(),
+            events,
         }
     }
 
@@ -104,5 +114,29 @@ impl RpcDaemon {
                 }),
             }),
         }
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<RpcEvent> {
+        self.events.subscribe()
+    }
+
+    pub fn inject_inbound_test_message(&self, content: &str) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs() as i64)
+            .unwrap_or(0);
+        let record = crate::storage::messages::MessageRecord {
+            id: format!("test-{}", timestamp),
+            source: "test-peer".into(),
+            destination: "local".into(),
+            content: content.into(),
+            timestamp,
+            direction: "in".into(),
+        };
+        let _ = self.store.insert_message(&record);
+        let _ = self.events.send(RpcEvent {
+            event_type: "inbound".into(),
+            payload: json!({ "message": record }),
+        });
     }
 }
