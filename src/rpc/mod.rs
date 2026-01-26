@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod http;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
@@ -47,14 +48,18 @@ struct SendMessageParams {
 }
 
 impl RpcDaemon {
-    pub fn test_instance() -> Self {
-        let store = MessagesStore::in_memory().expect("in-memory store");
+    pub fn with_store(store: MessagesStore, identity_hash: String) -> Self {
         let (events, _rx) = broadcast::channel(64);
         Self {
             store,
-            identity_hash: "test-identity".into(),
+            identity_hash,
             events,
         }
+    }
+
+    pub fn test_instance() -> Self {
+        let store = MessagesStore::in_memory().expect("in-memory store");
+        Self::with_store(store, "test-identity".into())
     }
 
     pub fn handle_rpc(&self, request: RpcRequest) -> Result<RpcResponse, std::io::Error> {
@@ -78,6 +83,11 @@ impl RpcDaemon {
                     error: None,
                 })
             }
+            "list_peers" => Ok(RpcResponse {
+                id: request.id,
+                result: Some(json!({ "peers": [] })),
+                error: None,
+            }),
             "send_message" => {
                 let params = request
                     .params
@@ -116,6 +126,14 @@ impl RpcDaemon {
         }
     }
 
+    pub fn handle_framed_request(&self, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
+        let request: RpcRequest = codec::decode_frame(bytes)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+        let response = self.handle_rpc(request)?;
+        codec::encode_frame(&response)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+    }
+
     pub fn subscribe_events(&self) -> broadcast::Receiver<RpcEvent> {
         self.events.subscribe()
     }
@@ -139,4 +157,11 @@ impl RpcDaemon {
             payload: json!({ "message": record }),
         });
     }
+}
+
+pub fn handle_framed_request(
+    daemon: &RpcDaemon,
+    bytes: &[u8],
+) -> Result<Vec<u8>, std::io::Error> {
+    daemon.handle_framed_request(bytes)
 }

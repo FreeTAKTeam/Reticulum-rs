@@ -22,6 +22,13 @@ impl MessagesStore {
         Ok(store)
     }
 
+    pub fn open(path: &std::path::Path) -> rusqlite::Result<Self> {
+        let conn = Connection::open(path)?;
+        let store = Self { conn };
+        store.init_schema()?;
+        Ok(store)
+    }
+
     pub fn insert_message(&self, record: &MessageRecord) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO messages (id, source, destination, content, timestamp, direction) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
