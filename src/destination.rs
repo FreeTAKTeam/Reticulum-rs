@@ -388,6 +388,14 @@ pub type SingleOutputDestination = Destination<Identity, Output, Single>;
 pub type PlainInputDestination = Destination<EmptyIdentity, Input, Plain>;
 pub type PlainOutputDestination = Destination<EmptyIdentity, Output, Plain>;
 
+pub fn new_in(identity: PrivateIdentity, app_name: &str, aspect: &str) -> SingleInputDestination {
+    SingleInputDestination::new(identity, DestinationName::new(app_name, aspect))
+}
+
+pub fn new_out(identity: Identity, app_name: &str, aspect: &str) -> SingleOutputDestination {
+    SingleOutputDestination::new(identity, DestinationName::new(app_name, aspect))
+}
+
 #[cfg(test)]
 mod tests {
     use rand_core::OsRng;
