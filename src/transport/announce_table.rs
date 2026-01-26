@@ -21,6 +21,19 @@ pub struct AnnounceEntry {
 }
 
 impl AnnounceEntry {
+    pub fn dummy() -> Self {
+        let now = Instant::now();
+        Self {
+            packet: Packet::default(),
+            timestamp: now,
+            timeout: now,
+            received_from: AddressHash::new_empty(),
+            retries: 0,
+            hops: 0,
+            response_to_iface: None,
+        }
+    }
+
     pub fn retransmit(
         &mut self,
         transport_id: &AddressHash,
@@ -63,14 +76,14 @@ impl AnnounceEntry {
     }
 }
 
-struct AnnounceCache {
+pub struct AnnounceCache {
     newer: Option<BTreeMap<AddressHash, AnnounceEntry>>,
     older: Option<BTreeMap<AddressHash, AnnounceEntry>>,
     capacity: usize
 }
 
 impl AnnounceCache {
-    fn new(capacity: usize) -> Self {
+    pub fn new(capacity: usize) -> Self {
         Self {
             newer: Some(BTreeMap::new()),
             older: None,
@@ -78,7 +91,11 @@ impl AnnounceCache {
         }
     }
 
-    fn insert(&mut self, destination: AddressHash, entry: AnnounceEntry) {
+    pub fn insert(&mut self, destination: AddressHash, entry: AnnounceEntry) {
+        if self.capacity > 0 && self.len() >= self.capacity {
+            self.evict_one();
+        }
+
         if self.newer.as_ref().unwrap().len() >= self.capacity {
             self.older = Some(self.newer.take().unwrap());
             self.newer = Some(BTreeMap::new());
@@ -97,6 +114,30 @@ impl AnnounceCache {
         }
 
         return None;
+    }
+
+    pub fn len(&self) -> usize {
+        let newer_len = self.newer.as_ref().map(|m| m.len()).unwrap_or(0);
+        let older_len = self.older.as_ref().map(|m| m.len()).unwrap_or(0);
+        newer_len + older_len
+    }
+
+    fn evict_one(&mut self) {
+        if let Some(ref mut older) = self.older {
+            if let Some(first_key) = older.keys().next().cloned() {
+                older.remove(&first_key);
+                if older.is_empty() {
+                    self.older = None;
+                }
+                return;
+            }
+        }
+
+        if let Some(ref mut newer) = self.newer {
+            if let Some(first_key) = newer.keys().next().cloned() {
+                newer.remove(&first_key);
+            }
+        }
     }
 
     fn clear(&mut self) {

@@ -46,7 +46,7 @@ use crate::packet::PacketDataBuffer;
 use crate::packet::PacketType;
 
 mod announce_limits;
-mod announce_table;
+pub mod announce_table;
 mod link_table;
 mod packet_cache;
 mod path_requests;
