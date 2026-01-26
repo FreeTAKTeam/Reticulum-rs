@@ -2,6 +2,7 @@
 extern crate alloc;
 
 pub mod buffer;
+pub mod channel;
 pub mod crypt;
 pub mod destination;
 pub mod error;
@@ -9,6 +10,7 @@ pub mod hash;
 pub mod identity;
 pub mod iface;
 pub mod packet;
+pub mod resource;
 pub mod transport;
 
 pub use crate::destination::{group_decrypt, group_encrypt};
