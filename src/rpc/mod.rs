@@ -30,6 +30,14 @@ pub struct RpcDaemon {
     identity_hash: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct SendMessageParams {
+    id: String,
+    source: String,
+    destination: String,
+    content: String,
+}
+
 impl RpcDaemon {
     pub fn test_instance() -> Self {
         let store = MessagesStore::in_memory().expect("in-memory store");
@@ -57,6 +65,33 @@ impl RpcDaemon {
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "messages": items })),
+                    error: None,
+                })
+            }
+            "send_message" => {
+                let params = request
+                    .params
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let parsed: SendMessageParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_secs() as i64)
+                    .unwrap_or(0);
+                let record = crate::storage::messages::MessageRecord {
+                    id: parsed.id.clone(),
+                    source: parsed.source,
+                    destination: parsed.destination,
+                    content: parsed.content,
+                    timestamp,
+                    direction: "out".into(),
+                };
+                self.store
+                    .insert_message(&record)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "message_id": record.id })),
                     error: None,
                 })
             }
