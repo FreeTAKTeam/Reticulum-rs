@@ -409,6 +409,22 @@ pub fn lxmf_verify(identity: &Identity, data: &[u8], signature: &[u8]) -> bool {
     identity.verify(data, &signature).is_ok()
 }
 
+pub fn verify(pubkey: [u8; 32], data: &[u8], signature: &[u8]) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+    let sig = match Signature::from_slice(signature) {
+        Ok(sig) => sig,
+        Err(_) => return false,
+    };
+
+    let vk = match VerifyingKey::from_bytes(&pubkey) {
+        Ok(vk) => vk,
+        Err(_) => return false,
+    };
+
+    vk.verify(data, &sig).is_ok()
+}
+
 pub struct GroupIdentity {}
 
 pub struct DerivedKey {
