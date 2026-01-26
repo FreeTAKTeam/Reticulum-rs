@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MessageRecord {
     pub id: String,
     pub source: String,
