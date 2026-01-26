@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
 use crate::storage::messages::MessagesStore;
+use std::sync::Mutex;
 use tokio::sync::broadcast;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -31,6 +32,7 @@ pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
     events: broadcast::Sender<RpcEvent>,
+    last_event: Mutex<Option<RpcEvent>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -54,6 +56,7 @@ impl RpcDaemon {
             store,
             identity_hash,
             events,
+            last_event: Mutex::new(None),
         }
     }
 
@@ -115,6 +118,45 @@ impl RpcDaemon {
                     error: None,
                 })
             }
+            "receive_message" => {
+                let params = request
+                    .params
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let parsed: SendMessageParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_secs() as i64)
+                    .unwrap_or(0);
+                let record = crate::storage::messages::MessageRecord {
+                    id: parsed.id.clone(),
+                    source: parsed.source,
+                    destination: parsed.destination,
+                    content: parsed.content,
+                    timestamp,
+                    direction: "in".into(),
+                };
+                self.store
+                    .insert_message(&record)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                let event = RpcEvent {
+                    event_type: "inbound".into(),
+                    payload: json!({ "message": record }),
+                };
+                {
+                    let mut guard = self
+                        .last_event
+                        .lock()
+                        .expect("last_event mutex poisoned");
+                    *guard = Some(event.clone());
+                }
+                let _ = self.events.send(event);
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "message_id": parsed.id })),
+                    error: None,
+                })
+            }
             _ => Ok(RpcResponse {
                 id: request.id,
                 result: None,
@@ -138,6 +180,14 @@ impl RpcDaemon {
         self.events.subscribe()
     }
 
+    pub fn take_event(&self) -> Option<RpcEvent> {
+        let mut guard = self
+            .last_event
+            .lock()
+            .expect("last_event mutex poisoned");
+        guard.take()
+    }
+
     pub fn inject_inbound_test_message(&self, content: &str) {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -152,10 +202,18 @@ impl RpcDaemon {
             direction: "in".into(),
         };
         let _ = self.store.insert_message(&record);
-        let _ = self.events.send(RpcEvent {
+        let event = RpcEvent {
             event_type: "inbound".into(),
             payload: json!({ "message": record }),
-        });
+        };
+        {
+            let mut guard = self
+                .last_event
+                .lock()
+                .expect("last_event mutex poisoned");
+            *guard = Some(event.clone());
+        }
+        let _ = self.events.send(event);
     }
 }
 

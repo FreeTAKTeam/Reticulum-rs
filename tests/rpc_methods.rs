@@ -57,6 +57,38 @@ fn send_message_persists() {
 }
 
 #[test]
+fn receive_message_persists_and_emits_event() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 5,
+            method: "receive_message".into(),
+            params: Some(serde_json::json!({
+                "id": "msg-2",
+                "source": "alice",
+                "destination": "bob",
+                "content": "hello"
+            })),
+        })
+        .unwrap();
+
+    let resp = daemon
+        .handle_rpc(RpcRequest {
+            id: 6,
+            method: "list_messages".into(),
+            params: None,
+        })
+        .unwrap();
+
+    let items = resp.result.unwrap()["messages"].as_array().unwrap().clone();
+    assert_eq!(items.len(), 1);
+
+    let event = daemon.take_event().expect("event");
+    assert_eq!(event.event_type, "inbound");
+    assert_eq!(event.payload["message"]["id"], "msg-2");
+}
+
+#[test]
 fn list_peers_returns_empty_array() {
     let daemon = RpcDaemon::test_instance();
     let resp = daemon
