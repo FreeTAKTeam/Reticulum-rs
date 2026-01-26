@@ -7,6 +7,7 @@ use crate::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use crate::error::RnsError;
 use crate::hash::AddressHash;
 use crate::hash::Hash;
+use crate::hash::ADDRESS_HASH_SIZE;
 
 pub const PACKET_MDU: usize = 2048usize;
 pub const LXMF_MAX_PAYLOAD: usize =
@@ -253,6 +254,74 @@ pub struct Packet {
 
 impl Packet {
     pub const LXMF_MAX_PAYLOAD: usize = LXMF_MAX_PAYLOAD;
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, RnsError> {
+        let min_len = 2 + ADDRESS_HASH_SIZE + 1;
+        if bytes.len() < min_len {
+            return Err(RnsError::InvalidArgument);
+        }
+
+        let flags = bytes[0];
+        let hops = bytes[1];
+
+        let mut header = Header::from_meta(flags);
+        header.hops = hops;
+
+        let mut idx = 2;
+
+        let transport = if header.header_type == HeaderType::Type2 {
+            if bytes.len() < idx + ADDRESS_HASH_SIZE {
+                return Err(RnsError::InvalidArgument);
+            }
+            let mut raw = [0u8; ADDRESS_HASH_SIZE];
+            raw.copy_from_slice(&bytes[idx..idx + ADDRESS_HASH_SIZE]);
+            idx += ADDRESS_HASH_SIZE;
+            Some(AddressHash::new(raw))
+        } else {
+            None
+        };
+
+        if bytes.len() < idx + ADDRESS_HASH_SIZE + 1 {
+            return Err(RnsError::InvalidArgument);
+        }
+
+        let mut dest_raw = [0u8; ADDRESS_HASH_SIZE];
+        dest_raw.copy_from_slice(&bytes[idx..idx + ADDRESS_HASH_SIZE]);
+        idx += ADDRESS_HASH_SIZE;
+        let destination = AddressHash::new(dest_raw);
+
+        let context = PacketContext::from(bytes[idx]);
+        idx += 1;
+
+        let data = PacketDataBuffer::new_from_slice(&bytes[idx..]);
+
+        Ok(Self {
+            header,
+            ifac: None,
+            destination,
+            transport,
+            context,
+            data,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, RnsError> {
+        let mut out = Vec::with_capacity(2 + ADDRESS_HASH_SIZE + 1 + self.data.len());
+
+        out.push(self.header.to_meta());
+        out.push(self.header.hops);
+
+        if self.header.header_type == HeaderType::Type2 {
+            let transport = self.transport.ok_or(RnsError::InvalidArgument)?;
+            out.extend_from_slice(transport.as_slice());
+        }
+
+        out.extend_from_slice(self.destination.as_slice());
+        out.push(self.context as u8);
+        out.extend_from_slice(self.data.as_slice());
+
+        Ok(out)
+    }
 
     pub fn hash(&self) -> Hash {
         Hash::new(
