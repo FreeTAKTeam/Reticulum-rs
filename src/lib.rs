@@ -13,6 +13,7 @@ pub mod iface;
 pub mod packet;
 pub mod resource;
 pub mod rpc;
+pub mod storage;
 pub mod transport;
 
 pub use crate::destination::{group_decrypt, group_encrypt};
