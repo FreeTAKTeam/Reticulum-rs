@@ -1,9 +1,11 @@
 use std::{collections::HashMap, time::Instant};
 
 use crate::{
+    error::RnsError,
     hash::{AddressHash, Hash},
     packet::{DestinationType, Header, HeaderType, IfacFlag, Packet, PacketType},
 };
+use rmp::encode::write_array_len;
 
 pub struct PathEntry {
     pub timestamp: Instant,
@@ -22,6 +24,16 @@ impl PathTable {
         Self {
             map: HashMap::new(),
         }
+    }
+
+    pub fn to_msgpack(&self) -> Result<Vec<u8>, RnsError> {
+        if !self.map.is_empty() {
+            return Err(RnsError::InvalidArgument);
+        }
+
+        let mut out = Vec::new();
+        write_array_len(&mut out, 0).map_err(|_| RnsError::InvalidArgument)?;
+        Ok(out)
     }
 
     pub fn get(&self, destination: &AddressHash) -> Option<&PathEntry> {

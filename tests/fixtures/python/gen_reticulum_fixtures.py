@@ -85,7 +85,7 @@ def main() -> None:
     write_bytes(out_dir / "encrypted_payload.bin", ciphertext)
 
     # Empty routing table placeholder
-    write_bytes(out_dir / "routing_table.bin", umsgpack.packb({}))
+    write_bytes(out_dir / "routing_table.bin", umsgpack.packb([]))
 
 
 if __name__ == "__main__":

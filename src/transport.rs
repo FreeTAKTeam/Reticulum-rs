@@ -50,7 +50,7 @@ pub mod announce_table;
 mod link_table;
 mod packet_cache;
 mod path_requests;
-mod path_table;
+pub mod path_table;
 
 // TODO: Configure via features
 const PACKET_TRACE: bool = false;
