@@ -13,6 +13,7 @@ use crate::{
 };
 
 pub const PUBLIC_KEY_LENGTH: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
+pub const PRIVATE_KEY_LENGTH: usize = PUBLIC_KEY_LENGTH * 2;
 
 #[cfg(feature = "fernet-aes128")]
 pub const DERIVED_KEY_LENGTH: usize = 256 / 8;
@@ -292,6 +293,29 @@ impl PrivateIdentity {
 
     pub fn sign_key(&self) -> &SigningKey {
         &self.sign_key
+    }
+
+    pub fn from_private_key_bytes(bytes: &[u8]) -> Result<Self, RnsError> {
+        if bytes.len() != PRIVATE_KEY_LENGTH {
+            return Err(RnsError::InvalidArgument);
+        }
+
+        let mut private_key_bytes = [0u8; PUBLIC_KEY_LENGTH];
+        let mut sign_key_bytes = [0u8; PUBLIC_KEY_LENGTH];
+        private_key_bytes.copy_from_slice(&bytes[..PUBLIC_KEY_LENGTH]);
+        sign_key_bytes.copy_from_slice(&bytes[PUBLIC_KEY_LENGTH..]);
+
+        Ok(Self::new(
+            StaticSecret::from(private_key_bytes),
+            SigningKey::from_bytes(&sign_key_bytes),
+        ))
+    }
+
+    pub fn to_private_key_bytes(&self) -> [u8; PRIVATE_KEY_LENGTH] {
+        let mut bytes = [0u8; PRIVATE_KEY_LENGTH];
+        bytes[..PUBLIC_KEY_LENGTH].copy_from_slice(self.private_key.as_bytes());
+        bytes[PUBLIC_KEY_LENGTH..].copy_from_slice(self.sign_key.as_bytes());
+        bytes
     }
 
     pub fn into(&self) -> &Identity {
