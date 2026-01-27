@@ -52,6 +52,12 @@ struct SendMessageParams {
     fields: Option<JsonValue>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RecordReceiptParams {
+    message_id: String,
+    status: String,
+}
+
 impl RpcDaemon {
     pub fn with_store(store: MessagesStore, identity_hash: String) -> Self {
         let (events, _rx) = broadcast::channel(64);
@@ -112,6 +118,7 @@ impl RpcDaemon {
                     timestamp,
                     direction: "out".into(),
                     fields: parsed.fields,
+                    receipt_status: None,
                 };
                 self.store
                     .insert_message(&record)
@@ -140,6 +147,7 @@ impl RpcDaemon {
                     timestamp,
                     direction: "in".into(),
                     fields: parsed.fields,
+                    receipt_status: None,
                 };
                 self.store
                     .insert_message(&record)
@@ -153,6 +161,21 @@ impl RpcDaemon {
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "message_id": parsed.id })),
+                    error: None,
+                })
+            }
+            "record_receipt" => {
+                let params = request
+                    .params
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let parsed: RecordReceiptParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                self.store
+                    .update_receipt_status(&parsed.message_id, &parsed.status)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "message_id": parsed.message_id, "status": parsed.status })),
                     error: None,
                 })
             }
@@ -256,6 +279,7 @@ impl RpcDaemon {
             timestamp,
             direction: "in".into(),
             fields: None,
+            receipt_status: None,
         };
         let _ = self.store.insert_message(&record);
         let event = RpcEvent {

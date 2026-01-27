@@ -10,6 +10,7 @@ pub struct MessageRecord {
     pub timestamp: i64,
     pub direction: String,
     pub fields: Option<JsonValue>,
+    pub receipt_status: Option<String>,
 }
 
 pub struct MessagesStore {
@@ -37,7 +38,7 @@ impl MessagesStore {
             .as_ref()
             .map(|value| serde_json::to_string(value).unwrap_or_default());
         self.conn.execute(
-            "INSERT OR REPLACE INTO messages (id, source, destination, content, timestamp, direction, fields) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO messages (id, source, destination, content, timestamp, direction, fields, receipt_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 record.id,
                 record.source,
@@ -46,6 +47,7 @@ impl MessagesStore {
                 record.timestamp,
                 record.direction,
                 fields_json,
+                record.receipt_status,
             ],
         )?;
         Ok(())
@@ -59,7 +61,7 @@ impl MessagesStore {
         let mut records = Vec::new();
         if let Some(ts) = before_ts {
             let mut stmt = self.conn.prepare(
-                "SELECT id, source, destination, content, timestamp, direction, fields FROM messages WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
+                "SELECT id, source, destination, content, timestamp, direction, fields, receipt_status FROM messages WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
             )?;
             let mut rows = stmt.query(params![ts, limit as i64])?;
             while let Some(row) = rows.next()? {
@@ -67,6 +69,7 @@ impl MessagesStore {
                 let fields = fields_json
                     .as_ref()
                     .and_then(|value| serde_json::from_str(value).ok());
+                let receipt_status: Option<String> = row.get(7)?;
                 records.push(MessageRecord {
                     id: row.get(0)?,
                     source: row.get(1)?,
@@ -75,11 +78,12 @@ impl MessagesStore {
                     timestamp: row.get(4)?,
                     direction: row.get(5)?,
                     fields,
+                    receipt_status,
                 });
             }
         } else {
             let mut stmt = self.conn.prepare(
-                "SELECT id, source, destination, content, timestamp, direction, fields FROM messages ORDER BY timestamp DESC LIMIT ?1",
+                "SELECT id, source, destination, content, timestamp, direction, fields, receipt_status FROM messages ORDER BY timestamp DESC LIMIT ?1",
             )?;
             let mut rows = stmt.query(params![limit as i64])?;
             while let Some(row) = rows.next()? {
@@ -87,6 +91,7 @@ impl MessagesStore {
                 let fields = fields_json
                     .as_ref()
                     .and_then(|value| serde_json::from_str(value).ok());
+                let receipt_status: Option<String> = row.get(7)?;
                 records.push(MessageRecord {
                     id: row.get(0)?,
                     source: row.get(1)?,
@@ -95,10 +100,23 @@ impl MessagesStore {
                     timestamp: row.get(4)?,
                     direction: row.get(5)?,
                     fields,
+                    receipt_status,
                 });
             }
         }
         Ok(records)
+    }
+
+    pub fn update_receipt_status(
+        &self,
+        message_id: &str,
+        status: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE messages SET receipt_status = ?1 WHERE id = ?2",
+            params![status, message_id],
+        )?;
+        Ok(())
     }
 
     fn init_schema(&self) -> rusqlite::Result<()> {
@@ -110,12 +128,16 @@ impl MessagesStore {
                 content TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
                 direction TEXT NOT NULL,
-                fields TEXT
+                fields TEXT,
+                receipt_status TEXT
             );",
         )?;
         let _ = self
             .conn
             .execute("ALTER TABLE messages ADD COLUMN fields TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE messages ADD COLUMN receipt_status TEXT", []);
         Ok(())
     }
 }
