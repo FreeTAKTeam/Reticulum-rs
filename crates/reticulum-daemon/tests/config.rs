@@ -1,4 +1,6 @@
 use reticulum_daemon::config::{DaemonConfig, InterfaceConfig};
+use std::fs;
+use tempfile::NamedTempFile;
 
 #[test]
 fn parses_tcp_client_interface() {
@@ -36,11 +38,25 @@ fn filters_enabled_tcp_clients() {
             },
         ],
     };
-    let enabled: Vec<_> = cfg
-        .interfaces
-        .iter()
-        .filter(|i| i.enabled.unwrap_or(false))
-        .collect();
-    assert_eq!(enabled.len(), 1);
-    assert_eq!(enabled[0].host.as_deref(), Some("rmap.world"));
+    let endpoints = cfg.tcp_client_endpoints();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].0, "rmap.world");
+    assert_eq!(endpoints[0].1, 4242);
+}
+
+#[test]
+fn loads_config_from_file() {
+    let input = r#"
+interfaces = [
+  { type = "tcp_client", enabled = true, host = "rmap.world", port = 4242 }
+]
+"#;
+    let file = NamedTempFile::new().expect("temp file");
+    fs::write(file.path(), input).expect("write");
+
+    let cfg = DaemonConfig::from_path(file.path()).expect("load");
+    let endpoints = cfg.tcp_client_endpoints();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].0, "rmap.world");
+    assert_eq!(endpoints[0].1, 4242);
 }

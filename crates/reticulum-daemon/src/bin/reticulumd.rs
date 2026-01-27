@@ -12,12 +12,14 @@ use tokio::task::LocalSet;
 use reticulum::destination::{DestinationName, SingleInputDestination};
 use reticulum::hash::AddressHash;
 use reticulum::identity::{Identity, PrivateIdentity};
+use reticulum::iface::tcp_client::TcpClient;
 use reticulum::iface::tcp_server::TcpServer;
 use reticulum::rpc::{http, AnnounceBridge, OutboundBridge, RpcDaemon};
 use reticulum::storage::messages::MessagesStore;
 use reticulum::transport::{Transport, TransportConfig};
 use tokio::sync::mpsc::unbounded_channel;
 
+use reticulum_daemon::config::DaemonConfig;
 use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
 use reticulum_daemon::inbound_delivery::decode_inbound_payload;
@@ -33,6 +35,8 @@ struct Args {
     rpc: String,
     #[arg(long, default_value = "reticulum.db")]
     db: PathBuf,
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[arg(long)]
     identity: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
@@ -199,6 +203,28 @@ async fn main() {
                     .lock()
                     .await
                     .spawn(TcpServer::new(addr, iface_manager.clone()), TcpServer::spawn);
+                if let Some(config_path) = args.config.as_ref() {
+                    if let Ok(config) = DaemonConfig::from_path(config_path) {
+                        for (host, port) in config.tcp_client_endpoints() {
+                            let addr = format!("{}:{}", host, port);
+                            iface_manager
+                                .lock()
+                                .await
+                                .spawn(TcpClient::new(addr), TcpClient::spawn);
+                            eprintln!(
+                                "[daemon] tcp_client enabled name={} host={} port={}",
+                                host,
+                                host,
+                                port
+                            );
+                        }
+                    } else {
+                        eprintln!(
+                            "[daemon] failed to load config: {}",
+                            config_path.display()
+                        );
+                    }
+                }
                 eprintln!("[daemon] transport enabled");
 
                 let destination = transport_instance
