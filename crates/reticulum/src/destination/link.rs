@@ -120,6 +120,7 @@ impl From<&Packet> for LinkId {
 pub enum LinkHandleResult {
     None,
     Activated,
+    Proof(Packet),
     KeepAlive,
 }
 
@@ -143,6 +144,7 @@ pub struct Link {
     priv_identity: PrivateIdentity,
     peer_identity: Identity,
     derived_key: DerivedKey,
+    signalling: Option<[u8; LINK_MTU_SIZE]>,
     status: LinkStatus,
     request_time: Instant,
     rtt: Duration,
@@ -160,6 +162,7 @@ impl Link {
             priv_identity: PrivateIdentity::new_from_rand(OsRng),
             peer_identity: Identity::default(),
             derived_key: DerivedKey::new_empty(),
+            signalling: None,
             status: LinkStatus::Pending,
             request_time: Instant::now(),
             rtt: Duration::from_secs(0),
@@ -177,10 +180,18 @@ impl Link {
             return Err(RnsError::InvalidArgument);
         }
 
+        let data = packet.data.as_slice();
         let peer_identity = Identity::new_from_slices(
-            &packet.data.as_slice()[..PUBLIC_KEY_LENGTH],
-            &packet.data.as_slice()[PUBLIC_KEY_LENGTH..PUBLIC_KEY_LENGTH * 2],
+            &data[..PUBLIC_KEY_LENGTH],
+            &data[PUBLIC_KEY_LENGTH..PUBLIC_KEY_LENGTH * 2],
         );
+        let signalling = if data.len() >= PUBLIC_KEY_LENGTH * 2 + LINK_MTU_SIZE {
+            let mut bytes = [0u8; LINK_MTU_SIZE];
+            bytes.copy_from_slice(&data[PUBLIC_KEY_LENGTH * 2..PUBLIC_KEY_LENGTH * 2 + LINK_MTU_SIZE]);
+            Some(bytes)
+        } else {
+            None
+        };
 
         let link_id = LinkId::from(packet);
         log::debug!("link: create from request {}", link_id);
@@ -191,6 +202,7 @@ impl Link {
             priv_identity: PrivateIdentity::new(StaticSecret::random_from_rng(OsRng), signing_key),
             peer_identity,
             derived_key: DerivedKey::new_empty(),
+            signalling,
             status: LinkStatus::Pending,
             request_time: Instant::now(),
             rtt: Duration::from_secs(0),
@@ -240,22 +252,51 @@ impl Link {
         packet_data.safe_write(self.id.as_slice());
         packet_data.safe_write(self.priv_identity.as_identity().public_key.as_bytes());
         packet_data.safe_write(self.priv_identity.as_identity().verifying_key.as_bytes());
+        if let Some(signalling) = self.signalling {
+            packet_data.safe_write(&signalling);
+        }
 
         let signature = self.priv_identity.sign(packet_data.as_slice());
 
         packet_data.reset();
         packet_data.safe_write(&signature.to_bytes()[..]);
         packet_data.safe_write(self.priv_identity.as_identity().public_key.as_bytes());
+        if let Some(signalling) = self.signalling {
+            packet_data.safe_write(&signalling);
+        }
 
         Packet {
             header: Header {
                 packet_type: PacketType::Proof,
+                destination_type: DestinationType::Link,
                 ..Default::default()
             },
             ifac: None,
             destination: self.id,
             transport: None,
             context: PacketContext::LinkRequestProof,
+            data: packet_data,
+        }
+    }
+
+    pub fn prove_packet(&self, packet: &Packet) -> Packet {
+        let hash = packet.hash().to_bytes();
+        let signature = self.priv_identity.sign(&hash).to_bytes();
+        let mut packet_data = PacketDataBuffer::new();
+
+        packet_data.safe_write(&hash);
+        packet_data.safe_write(&signature);
+
+        Packet {
+            header: Header {
+                packet_type: PacketType::Proof,
+                destination_type: DestinationType::Link,
+                ..Default::default()
+            },
+            ifac: None,
+            destination: self.id,
+            transport: None,
+            context: PacketContext::LinkProof,
             data: packet_data,
         }
     }
@@ -269,9 +310,16 @@ impl Link {
             PacketContext::None => {
                 let mut buffer = [0u8; PACKET_MDU];
                 if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
+                    let preview_len = plain_text.len().min(32);
+                    eprintln!(
+                        "[link] data_plain len={} preview={}",
+                        plain_text.len(),
+                        bytes_to_hex(&plain_text[..preview_len])
+                    );
                     log::trace!("link({}): data {}B", self.id, plain_text.len());
                     self.request_time = Instant::now();
                     self.post_event(LinkEvent::Data(Box::new(LinkPayload::new_from_slice(plain_text))));
+                    return LinkHandleResult::Proof(self.prove_packet(packet));
                 } else {
                     log::error!("link({}): can't decrypt packet", self.id);
                 }
@@ -473,6 +521,15 @@ impl Link {
     pub fn id(&self) -> &LinkId {
         &self.id
     }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
 }
 
 fn validate_proof_packet(

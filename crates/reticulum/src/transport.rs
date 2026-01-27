@@ -30,7 +30,7 @@ use crate::destination::DestinationName;
 use crate::destination::SingleInputDestination;
 use crate::destination::SingleOutputDestination;
 
-use crate::hash::AddressHash;
+use crate::hash::{AddressHash, HASH_SIZE};
 use crate::identity::PrivateIdentity;
 
 use crate::iface::InterfaceManager;
@@ -583,6 +583,22 @@ impl Drop for Transport {
 
 impl TransportHandler {
     async fn send_packet(&self, packet: Packet) {
+        if packet.header.packet_type == PacketType::Proof {
+            eprintln!(
+                "[tp] send_proof dst={} ctx={:02x}",
+                packet.destination,
+                packet.context as u8
+            );
+            if packet.context == PacketContext::LinkRequestProof {
+                if let Ok(raw) = packet.to_bytes() {
+                    eprintln!(
+                        "[tp] lrproof_raw len={} hex={}",
+                        raw.len(),
+                        bytes_to_hex(&raw)
+                    );
+                }
+            }
+        }
         let message = TxMessage {
             tx_type: TxMessageType::Broadcast(None),
             packet,
@@ -649,19 +665,35 @@ impl TransportHandler {
 }
 
 async fn handle_proof(packet: Packet, handler: Arc<Mutex<TransportHandler>>) {
-    let receipt = DeliveryReceipt::new(packet.hash().to_bytes());
-    let receipt_handler = {
-        let handler = handler.lock().await;
-        log::trace!(
-            "tp({}): handle proof for {}",
-            handler.config.name,
-            packet.destination
-        );
-        handler.receipt_handler.clone()
+    eprintln!(
+        "[tp] proof dst={} ctx={:02x}",
+        packet.destination,
+        packet.context as u8
+    );
+    let receipt_hash = if packet.context != PacketContext::LinkRequestProof
+        && packet.data.len() >= HASH_SIZE
+    {
+        let mut hash = [0u8; HASH_SIZE];
+        hash.copy_from_slice(&packet.data.as_slice()[..HASH_SIZE]);
+        Some(hash)
+    } else {
+        None
     };
+    if let Some(receipt_hash) = receipt_hash {
+        let receipt = DeliveryReceipt::new(receipt_hash);
+        let receipt_handler = {
+            let handler = handler.lock().await;
+            log::trace!(
+                "tp({}): handle proof for {}",
+                handler.config.name,
+                packet.destination
+            );
+            handler.receipt_handler.clone()
+        };
 
-    if let Some(receipt_handler) = receipt_handler {
-        receipt_handler.on_receipt(&receipt);
+        if let Some(receipt_handler) = receipt_handler {
+            receipt_handler.on_receipt(&receipt);
+        }
     }
 
     let mut handler = handler.lock().await;
@@ -692,7 +724,15 @@ fn handle_inbound_packet_for_test(
 ) -> Option<DeliveryReceipt> {
     match packet.header.packet_type {
         PacketType::Proof => {
-            Some(DeliveryReceipt::new(packet.hash().to_bytes()))
+            if packet.context != PacketContext::LinkRequestProof
+                && packet.data.len() >= HASH_SIZE
+            {
+                let mut hash = [0u8; HASH_SIZE];
+                hash.copy_from_slice(&packet.data.as_slice()[..HASH_SIZE]);
+                Some(DeliveryReceipt::new(hash))
+            } else {
+                None
+            }
         }
         _ => None
     }
@@ -746,18 +786,29 @@ async fn handle_data<'a>(packet: &Packet, handler: MutexGuard<'a, TransportHandl
     let mut data_handled = false;
 
     if packet.header.destination_type == DestinationType::Link {
+        eprintln!(
+            "[tp] link_data dst={} ctx={:02x} len={}",
+            packet.destination,
+            packet.context as u8,
+            packet.data.len()
+        );
         if let Some(link) = handler.in_links.get(&packet.destination).cloned() {
             let mut link = link.lock().await;
             let result = link.handle_packet(packet);
             if let LinkHandleResult::KeepAlive = result {
                 let packet = link.keep_alive_packet(KEEP_ALIVE_RESPONSE);
                 handler.send_packet(packet).await;
+            } else if let LinkHandleResult::Proof(proof_packet) = result {
+                handler.send_packet(proof_packet).await;
             }
         }
 
         for link in handler.out_links.values() {
             let mut link = link.lock().await;
-            let _ = link.handle_packet(packet);
+            let result = link.handle_packet(packet);
+            if let LinkHandleResult::Proof(proof_packet) = result {
+                handler.send_packet(proof_packet).await;
+            }
             data_handled = true;
         }
 
@@ -1003,6 +1054,11 @@ async fn handle_link_request_as_destination<'a>(
                 );
 
                 if let Ok(mut link) = link {
+                    eprintln!(
+                        "[tp] link_proof_tx dst={} link_id={}",
+                        packet.destination,
+                        link.id()
+                    );
                     handler.send_packet(link.prove()).await;
 
                     log::debug!(
@@ -1045,6 +1101,12 @@ async fn handle_link_request<'a>(
     iface: AddressHash,
     handler: MutexGuard<'a, TransportHandler>
 ) {
+    eprintln!(
+        "[tp] link_request dst={} ctx={:02x} hops={}",
+        packet.destination,
+        packet.context as u8,
+        packet.header.hops
+    );
     if let Some(destination) = handler
         .single_in_destinations
         .get(&packet.destination)
@@ -1360,6 +1422,15 @@ async fn manage_transport(
             }
         });
     }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
 }
 
 #[cfg(test)]
