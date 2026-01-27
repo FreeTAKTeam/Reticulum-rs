@@ -8,6 +8,7 @@ use crate::storage::messages::MessagesStore;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
+use tokio::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct RpcRequest {
@@ -209,6 +210,34 @@ impl RpcDaemon {
             guard.pop_front();
         }
         guard.push_back(event);
+    }
+
+    pub fn schedule_announce_for_test(&self, id: u64) {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs() as i64)
+            .unwrap_or(0);
+        let event = RpcEvent {
+            event_type: "announce_sent".into(),
+            payload: json!({ "timestamp": timestamp, "announce_id": id }),
+        };
+        self.push_event(event.clone());
+        let _ = self.events.send(event);
+    }
+
+    pub fn start_announce_scheduler(self: std::sync::Arc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn_local(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let id = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_secs() as u64)
+                    .unwrap_or(0);
+                self.schedule_announce_for_test(id);
+            }
+        })
     }
 
     pub fn inject_inbound_test_message(&self, content: &str) {
