@@ -4,7 +4,7 @@ pub mod http;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
-use crate::storage::messages::MessagesStore;
+use crate::storage::messages::{MessageRecord, MessagesStore};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
@@ -74,6 +74,33 @@ impl RpcDaemon {
         Self::with_store(store, "test-identity".into())
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn test_instance_with_identity(identity: impl Into<String>) -> Self {
+        let store = MessagesStore::in_memory().expect("in-memory store");
+        Self::with_store(store, identity.into())
+    }
+
+    fn store_inbound_record(&self, record: MessageRecord) -> Result<(), std::io::Error> {
+        self.store
+            .insert_message(&record)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+        let event = RpcEvent {
+            event_type: "inbound".into(),
+            payload: json!({ "message": record }),
+        };
+        self.push_event(event.clone());
+        let _ = self.events.send(event);
+        Ok(())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn accept_inbound_for_test(
+        &self,
+        record: MessageRecord,
+    ) -> Result<(), std::io::Error> {
+        self.store_inbound_record(record)
+    }
+
     pub fn handle_rpc(&self, request: RpcRequest) -> Result<RpcResponse, std::io::Error> {
         match request.method.as_str() {
             "status" => Ok(RpcResponse {
@@ -110,7 +137,7 @@ impl RpcDaemon {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|value| value.as_secs() as i64)
                     .unwrap_or(0);
-                let record = crate::storage::messages::MessageRecord {
+                let record = MessageRecord {
                     id: parsed.id.clone(),
                     source: parsed.source,
                     destination: parsed.destination,
@@ -123,6 +150,7 @@ impl RpcDaemon {
                 self.store
                     .insert_message(&record)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "message_id": record.id })),
@@ -139,7 +167,7 @@ impl RpcDaemon {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|value| value.as_secs() as i64)
                     .unwrap_or(0);
-                let record = crate::storage::messages::MessageRecord {
+                let record = MessageRecord {
                     id: parsed.id.clone(),
                     source: parsed.source,
                     destination: parsed.destination,
@@ -149,15 +177,7 @@ impl RpcDaemon {
                     fields: parsed.fields,
                     receipt_status: None,
                 };
-                self.store
-                    .insert_message(&record)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
-                let event = RpcEvent {
-                    event_type: "inbound".into(),
-                    payload: json!({ "message": record }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
+                self.store_inbound_record(record)?;
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "message_id": parsed.id })),
