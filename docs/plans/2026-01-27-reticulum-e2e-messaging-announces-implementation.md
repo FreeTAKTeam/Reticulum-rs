@@ -399,3 +399,37 @@ git commit -m "docs: add e2e manual checklist"
 - `/events` returns 204 repeatedly while announces are triggered.
 - Announce Now returns error from daemon.
 - Messages list does not refresh after inbound injection.
+
+## Two Daemon E2E
+
+### Start Daemon A (app-facing)
+```
+cargo run -p reticulum --bin reticulumd -- --rpc 127.0.0.1:4243 --db /tmp/reticulum-a.db --announce-interval-secs 10
+```
+
+### Start Daemon B (peer)
+```
+cargo run -p reticulum --bin reticulumd -- --rpc 127.0.0.1:4244 --db /tmp/reticulum-b.db --announce-interval-secs 15
+```
+
+### Weft setup
+- Enable daemon mode
+- Host: `127.0.0.1`
+- Port: `4243`
+
+### Announce + inbound
+- Use Dev Panel “Announce Now” → expect debug log entry `announce_sent`.
+- Use Dev Panel “Inject Inbound” → expect message list update.
+
+### Relay latest inbound (A → B)
+From Weft repo:
+```
+FROM_PORT=4243 TO_PORT=4244 node app/scripts/relay-message.ts
+```
+Expect: “Relayed latest inbound…” message.
+
+### Verify daemon B
+```
+printf 'POST /rpc HTTP/1.1\r\nHost: localhost\r\nContent-Length: %s\r\n\r\n' 0 | nc 127.0.0.1 4244
+```
+Then use Weft (pointed to B) or your RPC client to `list_messages` and confirm the relayed message exists.
