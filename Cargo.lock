@@ -876,6 +876,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "reticulum-daemon"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "lxmf",
+ "rand_core",
+ "reticulum",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "rmp"
 version = "0.8.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
