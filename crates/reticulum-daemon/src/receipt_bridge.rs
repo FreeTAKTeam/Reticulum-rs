@@ -1,7 +1,9 @@
 use reticulum::transport::{DeliveryReceipt, ReceiptHandler};
+use reticulum::rpc::{RpcDaemon, RpcRequest};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
+use serde_json::json;
 
 #[derive(Debug, Clone)]
 pub struct ReceiptEvent {
@@ -32,4 +34,16 @@ impl ReceiptHandler for ReceiptBridge {
             });
         }
     }
+}
+
+pub fn handle_receipt_event(daemon: &RpcDaemon, event: ReceiptEvent) -> Result<(), std::io::Error> {
+    let _ = daemon.handle_rpc(RpcRequest {
+        id: 0,
+        method: "record_receipt".into(),
+        params: Some(json!({
+            "message_id": event.message_id,
+            "status": event.status,
+        })),
+    })?;
+    Ok(())
 }
