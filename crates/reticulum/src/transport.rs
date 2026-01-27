@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use tokio::sync::MutexGuard;
 
 use crate::destination::link::Link;
+use crate::destination::link::LinkEvent;
 use crate::destination::link::LinkEventData;
 use crate::destination::link::LinkHandleResult;
 use crate::destination::link::LinkId;
@@ -83,6 +84,7 @@ pub mod test_bridge {
             id: record.id.clone(),
             source: record.source.clone(),
             destination: record.destination.clone(),
+            title: record.title.clone(),
             content: record.content.clone(),
             timestamp: record.timestamp,
             direction: "in".into(),
@@ -143,6 +145,7 @@ pub trait ReceiptHandler: Send + Sync {
 pub struct AnnounceEvent {
     pub destination: Arc<Mutex<SingleOutputDestination>>,
     pub app_data: PacketDataBuffer,
+    pub ratchet: Option<[u8; crate::destination::RATCHET_LENGTH]>,
 }
 
 pub(crate) struct TransportHandler {
@@ -268,6 +271,26 @@ impl Transport {
                 iface_messages_tx.clone(),
             ))
         };
+        {
+            let mut link_rx = link_in_event_tx.subscribe();
+            let received_data_tx = received_data_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match link_rx.recv().await {
+                        Ok(event) => {
+                            if let LinkEvent::Data(payload) = event.event {
+                                let _ = received_data_tx.send(ReceivedData {
+                                    destination: event.address_hash,
+                                    data: PacketDataBuffer::new_from_slice(payload.as_slice()),
+                                });
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                }
+            });
+        }
 
         Self {
             name,
@@ -803,57 +826,65 @@ async fn handle_announce<'a>(
 
     let destination_known = handler.has_destination(&packet.destination);
 
-    if let Ok(result) = DestinationAnnounce::validate(packet) {
-        let destination = result.0;
-        let app_data = result.1;
-        let dest_hash = destination.identity.address_hash;
-        let destination = Arc::new(Mutex::new(destination));
+    let announce = match DestinationAnnounce::validate(packet) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!(
+                "[transport] announce validate failed dst={} err={:?}",
+                packet.destination,
+                err
+            );
+            return;
+        }
+    };
+    let dest_hash = announce.destination.identity.address_hash;
+    let destination = Arc::new(Mutex::new(announce.destination));
 
-        if !destination_known {
-            if !handler
+    if !destination_known {
+        if !handler
+            .single_out_destinations
+            .contains_key(&packet.destination)
+        {
+            log::trace!(
+                "tp({}): new announce for {}",
+                handler.config.name,
+                packet.destination
+            );
+
+            handler
                 .single_out_destinations
-                .contains_key(&packet.destination)
-            {
-                log::trace!(
-                    "tp({}): new announce for {}",
-                    handler.config.name,
-                    packet.destination
-                );
-
-                handler
-                    .single_out_destinations
-                    .insert(packet.destination, destination.clone());
-            }
-
-            handler.announce_table.add(
-                packet,
-                dest_hash,
-                iface,
-            );
-
-            handler.path_table.handle_announce(
-                packet,
-                packet.transport,
-                iface,
-            );
+                .insert(packet.destination, destination.clone());
         }
 
-        let retransmit = handler.config.retransmit;
-        if retransmit {
-            let transport_id = *handler.config.identity.address_hash();
-            if let Some(message) = handler.announce_table.new_packet(
-                &dest_hash,
-                &transport_id,
-            ) {
-                handler.send(message).await;
-            }
-        }
+        handler.announce_table.add(
+            packet,
+            dest_hash,
+            iface,
+        );
 
-        let _ = handler.announce_tx.send(AnnounceEvent {
-            destination,
-            app_data: PacketDataBuffer::new_from_slice(app_data),
-        });
+        handler.path_table.handle_announce(
+            packet,
+            packet.transport,
+            iface,
+        );
     }
+
+    let retransmit = handler.config.retransmit;
+    if retransmit {
+        let transport_id = *handler.config.identity.address_hash();
+        if let Some(message) = handler.announce_table.new_packet(
+            &dest_hash,
+            &transport_id,
+        ) {
+            handler.send(message).await;
+        }
+    }
+
+    let _ = handler.announce_tx.send(AnnounceEvent {
+        destination,
+        app_data: PacketDataBuffer::new_from_slice(announce.app_data),
+        ratchet: announce.ratchet,
+    });
 }
 
 async fn handle_path_request<'a>(
@@ -862,6 +893,11 @@ async fn handle_path_request<'a>(
     iface: AddressHash,
 ) {
     if let Some(request) = handler.path_requests.decode(packet.data.as_slice()) {
+        eprintln!(
+            "[tp] path_request dest={} iface={}",
+            request.destination,
+            iface
+        );
         if let Some(dest) = handler.single_in_destinations.get(&request.destination) {
             let response = dest
                 .lock()
@@ -873,6 +909,11 @@ async fn handle_path_request<'a>(
                 tx_type: TxMessageType::Direct(iface),
                 packet: response,
             }).await;
+            eprintln!(
+                "[tp] path_response dest={} iface={}",
+                request.destination,
+                iface
+            );
 
             log::trace!(
                 "tp({}): send direct path response over {}",
@@ -1325,7 +1366,37 @@ async fn manage_transport(
 mod tests {
     use super::*;
 
+    use crate::destination::link::{LinkEvent, LinkEventData, LinkPayload};
+    use crate::identity::PrivateIdentity;
     use crate::packet::HeaderType;
+    use rand_core::OsRng;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn link_payload_is_forwarded_to_received_data() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let config = TransportConfig::new("test", &identity, true);
+        let transport = Transport::new(config);
+
+        let mut rx = transport.received_data_events();
+
+        let address_hash = AddressHash::new_from_rand(OsRng);
+        let payload = LinkPayload::new_from_slice(b"hello");
+
+        let _ = transport.link_in_event_tx.send(LinkEventData {
+            id: AddressHash::new_from_rand(OsRng),
+            address_hash,
+            event: LinkEvent::Data(Box::new(payload)),
+        });
+
+        let received = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("expected forwarded payload")
+            .expect("broadcast receive");
+
+        assert_eq!(received.destination, address_hash);
+        assert_eq!(received.data.as_slice(), b"hello");
+    }
 
     #[tokio::test]
     async fn drop_duplicates() {
