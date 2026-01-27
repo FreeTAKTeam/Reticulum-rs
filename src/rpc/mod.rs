@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
 use crate::storage::messages::MessagesStore;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
@@ -32,7 +33,7 @@ pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
     events: broadcast::Sender<RpcEvent>,
-    last_event: Mutex<Option<RpcEvent>>,
+    event_queue: Mutex<VecDeque<RpcEvent>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -56,7 +57,7 @@ impl RpcDaemon {
             store,
             identity_hash,
             events,
-            last_event: Mutex::new(None),
+            event_queue: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -143,13 +144,7 @@ impl RpcDaemon {
                     event_type: "inbound".into(),
                     payload: json!({ "message": record }),
                 };
-                {
-                    let mut guard = self
-                        .last_event
-                        .lock()
-                        .expect("last_event mutex poisoned");
-                    *guard = Some(event.clone());
-                }
+                self.push_event(event.clone());
                 let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
@@ -182,10 +177,21 @@ impl RpcDaemon {
 
     pub fn take_event(&self) -> Option<RpcEvent> {
         let mut guard = self
-            .last_event
+            .event_queue
             .lock()
-            .expect("last_event mutex poisoned");
-        guard.take()
+            .expect("event_queue mutex poisoned");
+        guard.pop_front()
+    }
+
+    pub fn push_event(&self, event: RpcEvent) {
+        let mut guard = self
+            .event_queue
+            .lock()
+            .expect("event_queue mutex poisoned");
+        if guard.len() >= 32 {
+            guard.pop_front();
+        }
+        guard.push_back(event);
     }
 
     pub fn inject_inbound_test_message(&self, content: &str) {
@@ -206,13 +212,7 @@ impl RpcDaemon {
             event_type: "inbound".into(),
             payload: json!({ "message": record }),
         };
-        {
-            let mut guard = self
-                .last_event
-                .lock()
-                .expect("last_event mutex poisoned");
-            *guard = Some(event.clone());
-        }
+        self.push_event(event.clone());
         let _ = self.events.send(event);
     }
 }
