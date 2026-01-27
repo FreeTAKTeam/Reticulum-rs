@@ -725,6 +725,104 @@ async fn main() {
                 });
             }
 
+            if let Some(transport) = transport.clone() {
+                let daemon_inbound = daemon.clone();
+                let inbound_transport = transport.clone();
+                let inbound_identity = identity.clone();
+                tokio::task::spawn_local(async move {
+                    let mut rx = inbound_transport.received_data_events();
+                    loop {
+                        if let Ok(event) = rx.recv().await {
+                            let data = event.data.as_slice();
+                            eprintln!(
+                                "[daemon] rx data len={} dst={}",
+                                data.len(),
+                                hex::encode(event.destination.as_slice())
+                            );
+                            let payload = match decrypt_with_identity(
+                                &inbound_identity,
+                                inbound_identity.address_hash().as_slice(),
+                                data,
+                            ) {
+                                Ok(plain) => plain,
+                                Err(err) => {
+                                    eprintln!("[daemon] decrypt failed: {:?}", err);
+                                    data.to_vec()
+                                }
+                            };
+                            let mut lxmf_bytes = Vec::with_capacity(
+                                DESTINATION_LENGTH + payload.len(),
+                            );
+                            lxmf_bytes.extend_from_slice(event.destination.as_slice());
+                            lxmf_bytes.extend_from_slice(&payload);
+                            if let Ok(message) = decode_wire_message(&lxmf_bytes) {
+                                let id = lxmf::message::WireMessage::unpack(&lxmf_bytes)
+                                    .ok()
+                                    .map(|wire| wire.message_id())
+                                    .map(hex::encode)
+                                    .unwrap_or_else(|| hex::encode(event.destination.as_slice()));
+                                let record = reticulum::storage::messages::MessageRecord {
+                                    id,
+                                    source: hex::encode(message.source_hash.unwrap_or([0u8; 16])),
+                                    destination: hex::encode(
+                                        message.destination_hash.unwrap_or([0u8; 16]),
+                                    ),
+                                    title: message.title_as_string().unwrap_or_default(),
+                                    content: message.content_as_string().unwrap_or_default(),
+                                    timestamp: message
+                                        .timestamp
+                                        .map(|v| v as i64)
+                                        .unwrap_or(0),
+                                    direction: "in".into(),
+                                    fields: message
+                                        .fields
+                                        .as_ref()
+                                        .and_then(|value| rmpv_to_json(value)),
+                                    receipt_status: None,
+                                };
+                                let _ = daemon_inbound.accept_inbound(record);
+                            }
+                        }
+                    }
+                });
+
+                let daemon_announce = daemon.clone();
+                let peer_crypto = peer_crypto.clone();
+                let announce_transport = transport.clone();
+                tokio::task::spawn_local(async move {
+                    let mut rx = announce_transport.recv_announces().await;
+                    loop {
+                        if let Ok(event) = rx.recv().await {
+                            let dest = event.destination.lock().await;
+                            let peer = hex::encode(dest.desc.address_hash.as_slice());
+                            let public_key = *dest.desc.identity.public_key.as_bytes();
+                            let mut identity_hash = [0u8; 16];
+                            identity_hash.copy_from_slice(dest.desc.identity.address_hash.as_slice());
+                            let identity = dest.desc.identity;
+                            let ratchet = event.ratchet;
+                            peer_crypto
+                                .lock()
+                                .expect("peer map")
+                                .insert(
+                                    peer.clone(),
+                                    PeerCrypto {
+                                        identity_hash,
+                                        identity,
+                                        public_key,
+                                        ratchet,
+                                    },
+                                );
+                            eprintln!("[daemon] rx announce peer={}", peer);
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|value| value.as_secs() as i64)
+                                .unwrap_or(0);
+                            let _ = daemon_announce.accept_announce(peer, timestamp);
+                        }
+                    }
+                });
+            }
+
             let listener = TcpListener::bind(addr).await.unwrap();
             println!("reticulumd listening on http://{}", addr);
 
