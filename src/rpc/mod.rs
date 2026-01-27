@@ -152,6 +152,23 @@ impl RpcDaemon {
                     error: None,
                 })
             }
+            "announce_now" => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|value| value.as_secs() as i64)
+                    .unwrap_or(0);
+                let event = RpcEvent {
+                    event_type: "announce_sent".into(),
+                    payload: json!({ "timestamp": timestamp }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "announce_id": request.id })),
+                    error: None,
+                })
+            }
             _ => Ok(RpcResponse {
                 id: request.id,
                 result: None,
