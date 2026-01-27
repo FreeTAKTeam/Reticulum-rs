@@ -271,7 +271,7 @@ impl RpcDaemon {
         let _ = self.events.send(event);
     }
 
-    pub fn start_announce_scheduler(self: std::sync::Arc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+    pub fn start_announce_scheduler(self: std::rc::Rc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_local(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
             interval.tick().await;

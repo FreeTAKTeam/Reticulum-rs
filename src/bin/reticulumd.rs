@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use clap::Parser;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -29,7 +29,7 @@ async fn main() {
             let args = Args::parse();
             let addr: SocketAddr = args.rpc.parse().expect("invalid rpc address");
             let store = MessagesStore::open(&args.db).expect("open sqlite");
-            let daemon = Arc::new(RpcDaemon::with_store(store, "local".into()));
+            let daemon = Rc::new(RpcDaemon::with_store(store, "local".into()));
             if args.announce_interval_secs > 0 {
                 let _handle = daemon.clone().start_announce_scheduler(args.announce_interval_secs);
             }
