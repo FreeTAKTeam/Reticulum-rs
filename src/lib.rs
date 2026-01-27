@@ -6,6 +6,7 @@ pub mod channel;
 pub mod crypt;
 pub mod config;
 pub mod destination;
+pub mod e2e_harness;
 pub mod error;
 pub mod hash;
 pub mod identity;
