@@ -376,6 +376,15 @@ impl RpcDaemon {
         self.push_event(event.clone());
         let _ = self.events.send(event);
     }
+
+    pub fn emit_link_event_for_test(&self) {
+        let event = RpcEvent {
+            event_type: "link_activated".into(),
+            payload: json!({ "link_id": "test-link" }),
+        };
+        self.push_event(event.clone());
+        let _ = self.events.send(event);
+    }
 }
 
 pub fn handle_framed_request(
