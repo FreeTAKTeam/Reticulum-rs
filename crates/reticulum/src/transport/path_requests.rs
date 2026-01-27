@@ -2,7 +2,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rand_core::OsRng;
 
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 use crate::destination::DestinationName;
 use crate::destination::PlainInputDestination;
