@@ -1,14 +1,27 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::LocalSet;
 
-use reticulum::rpc::{http, RpcDaemon};
+use reticulum::destination::{DestinationName, SingleInputDestination};
+use reticulum::hash::AddressHash;
+use reticulum::identity::{Identity, PrivateIdentity};
+use reticulum::iface::tcp_server::TcpServer;
+use reticulum::rpc::{http, AnnounceBridge, OutboundBridge, RpcDaemon};
 use reticulum::storage::messages::MessagesStore;
+use reticulum::transport::{Transport, TransportConfig};
+
+use reticulum_daemon::direct_delivery::send_via_link;
+use reticulum_daemon::identity_store::load_or_create_identity;
+use reticulum_daemon::lxmf_bridge::{build_wire_message, decode_wire_message, rmpv_to_json};
+use reticulum_daemon::rns_crypto::decrypt_with_identity;
+use lxmf::constants::DESTINATION_LENGTH;
 
 #[derive(Parser, Debug)]
 #[command(name = "reticulumd")]
@@ -17,8 +30,124 @@ struct Args {
     rpc: String,
     #[arg(long, default_value = "reticulum.db")]
     db: PathBuf,
+    #[arg(long)]
+    identity: Option<PathBuf>,
     #[arg(long, default_value_t = 0)]
     announce_interval_secs: u64,
+    #[arg(long)]
+    transport: Option<String>,
+}
+
+struct TransportBridge {
+    transport: Arc<Transport>,
+    signer: PrivateIdentity,
+    announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
+    peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
+}
+
+#[derive(Clone, Copy)]
+struct PeerCrypto {
+    identity_hash: [u8; 16],
+    identity: Identity,
+    public_key: [u8; 32],
+    ratchet: Option<[u8; 32]>,
+}
+
+impl TransportBridge {
+    fn new(
+        transport: Arc<Transport>,
+        signer: PrivateIdentity,
+        announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
+        peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
+    ) -> Self {
+        Self {
+            transport,
+            signer,
+            announce_destination,
+            peer_crypto,
+        }
+    }
+}
+
+impl OutboundBridge for TransportBridge {
+    fn deliver(
+        &self,
+        record: &reticulum::storage::messages::MessageRecord,
+    ) -> Result<(), std::io::Error> {
+        let destination = parse_destination_hex(&record.destination);
+        let Some(destination) = destination else {
+            return Ok(());
+        };
+        let peer_info = self
+            .peer_crypto
+            .lock()
+            .expect("peer map")
+            .get(&record.destination)
+            .copied();
+        let Some(peer_info) = peer_info else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "peer not announced",
+            ));
+        };
+
+        let source_hash = self.signer.address_hash();
+        let mut source = [0u8; 16];
+        source.copy_from_slice(source_hash.as_slice());
+
+        let wire = build_wire_message(
+            source,
+            destination,
+            &record.title,
+            &record.content,
+            record.fields.clone(),
+            &self.signer,
+        )
+        .map_err(std::io::Error::other)?;
+
+        let payload = wire
+            .get(DESTINATION_LENGTH..)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "wire too short"))?;
+        let payload = payload.to_vec();
+
+        let destination_desc = reticulum::destination::DestinationDesc {
+            identity: peer_info.identity,
+            address_hash: AddressHash::new(destination),
+            name: DestinationName::new("lxmf", "delivery"),
+        };
+        let transport = self.transport.clone();
+        tokio::spawn(async move {
+            let _ = send_via_link(
+                transport.as_ref(),
+                destination_desc,
+                &payload,
+                std::time::Duration::from_secs(8),
+            )
+            .await;
+        });
+        Ok(())
+    }
+}
+
+impl AnnounceBridge for TransportBridge {
+    fn announce_now(&self) -> Result<(), std::io::Error> {
+        let transport = self.transport.clone();
+        let destination = self.announce_destination.clone();
+        tokio::spawn(async move {
+            transport.send_announce(&destination, None).await;
+        });
+        Ok(())
+    }
+}
+
+fn parse_destination_hex(input: &str) -> Option<[u8; 16]> {
+    let bytes = hex::decode(input).ok()?;
+    if bytes.len() != 16 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&bytes);
+    Some(out)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -29,9 +158,171 @@ async fn main() {
             let args = Args::parse();
             let addr: SocketAddr = args.rpc.parse().expect("invalid rpc address");
             let store = MessagesStore::open(&args.db).expect("open sqlite");
-            let daemon = Rc::new(RpcDaemon::with_store(store, "local".into()));
+
+            let identity_path = args.identity.clone().unwrap_or_else(|| {
+                let mut path = args.db.clone();
+                path.set_extension("identity");
+                path
+            });
+            let identity = load_or_create_identity(&identity_path).expect("load identity");
+            let identity_hash = hex::encode(identity.address_hash().as_slice());
+
+            let mut transport: Option<Arc<Transport>> = None;
+            let peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>> =
+                Arc::new(std::sync::Mutex::new(HashMap::new()));
+            let mut announce_destination: Option<Arc<tokio::sync::Mutex<SingleInputDestination>>> =
+                None;
+
+            if let Some(addr) = args.transport.clone() {
+                let config = TransportConfig::new("daemon", &identity, true);
+                let mut transport_instance = Transport::new(config);
+                let iface_manager = transport_instance.iface_manager();
+                iface_manager
+                    .lock()
+                    .await
+                    .spawn(TcpServer::new(addr, iface_manager.clone()), TcpServer::spawn);
+                eprintln!("[daemon] transport enabled");
+
+                let destination = transport_instance
+                    .add_destination(identity.clone(), DestinationName::new("lxmf", "delivery"))
+                    .await;
+                {
+                    let dest = destination.lock().await;
+                    eprintln!(
+                        "[daemon] delivery destination hash={}",
+                        hex::encode(dest.desc.address_hash.as_slice())
+                    );
+                }
+                announce_destination = Some(destination);
+                transport = Some(Arc::new(transport_instance));
+            }
+
+            let bridge: Option<Arc<TransportBridge>> = transport
+                .as_ref()
+                .zip(announce_destination.as_ref())
+                .map(|(transport, destination)| {
+                    Arc::new(TransportBridge::new(
+                        transport.clone(),
+                        identity.clone(),
+                        destination.clone(),
+                        peer_crypto.clone(),
+                    ))
+                });
+
+            let outbound_bridge: Option<Arc<dyn OutboundBridge>> = bridge
+                .as_ref()
+                .map(|bridge| bridge.clone() as Arc<dyn OutboundBridge>);
+            let announce_bridge: Option<Arc<dyn AnnounceBridge>> = bridge
+                .as_ref()
+                .map(|bridge| bridge.clone() as Arc<dyn AnnounceBridge>);
+
+            let daemon = Rc::new(RpcDaemon::with_store_and_bridges(
+                store,
+                identity_hash,
+                outbound_bridge,
+                announce_bridge,
+            ));
+
             if args.announce_interval_secs > 0 {
                 let _handle = daemon.clone().start_announce_scheduler(args.announce_interval_secs);
+            }
+
+            if let Some(transport) = transport.clone() {
+                let daemon_inbound = daemon.clone();
+                let inbound_transport = transport.clone();
+                let inbound_identity = identity.clone();
+                tokio::task::spawn_local(async move {
+                    let mut rx = inbound_transport.received_data_events();
+                    loop {
+                        if let Ok(event) = rx.recv().await {
+                            let data = event.data.as_slice();
+                            eprintln!(
+                                "[daemon] rx data len={} dst={}",
+                                data.len(),
+                                hex::encode(event.destination.as_slice())
+                            );
+                            let payload = match decrypt_with_identity(
+                                &inbound_identity,
+                                inbound_identity.address_hash().as_slice(),
+                                data,
+                            ) {
+                                Ok(plain) => plain,
+                                Err(err) => {
+                                    eprintln!("[daemon] decrypt failed: {:?}", err);
+                                    data.to_vec()
+                                }
+                            };
+                            let mut lxmf_bytes = Vec::with_capacity(
+                                DESTINATION_LENGTH + payload.len(),
+                            );
+                            lxmf_bytes.extend_from_slice(event.destination.as_slice());
+                            lxmf_bytes.extend_from_slice(&payload);
+                            if let Ok(message) = decode_wire_message(&lxmf_bytes) {
+                                let id = lxmf::message::WireMessage::unpack(&lxmf_bytes)
+                                    .ok()
+                                    .map(|wire| wire.message_id())
+                                    .map(hex::encode)
+                                    .unwrap_or_else(|| hex::encode(event.destination.as_slice()));
+                                let record = reticulum::storage::messages::MessageRecord {
+                                    id,
+                                    source: hex::encode(message.source_hash.unwrap_or([0u8; 16])),
+                                    destination: hex::encode(
+                                        message.destination_hash.unwrap_or([0u8; 16]),
+                                    ),
+                                    title: message.title_as_string().unwrap_or_default(),
+                                    content: message.content_as_string().unwrap_or_default(),
+                                    timestamp: message
+                                        .timestamp
+                                        .map(|v| v as i64)
+                                        .unwrap_or(0),
+                                    direction: "in".into(),
+                                    fields: message
+                                        .fields
+                                        .as_ref()
+                                        .and_then(|value| rmpv_to_json(value)),
+                                    receipt_status: None,
+                                };
+                                let _ = daemon_inbound.accept_inbound(record);
+                            }
+                        }
+                    }
+                });
+
+                let daemon_announce = daemon.clone();
+                let peer_crypto = peer_crypto.clone();
+                let announce_transport = transport.clone();
+                tokio::task::spawn_local(async move {
+                    let mut rx = announce_transport.recv_announces().await;
+                    loop {
+                        if let Ok(event) = rx.recv().await {
+                            let dest = event.destination.lock().await;
+                            let peer = hex::encode(dest.desc.address_hash.as_slice());
+                            let public_key = *dest.desc.identity.public_key.as_bytes();
+                            let mut identity_hash = [0u8; 16];
+                            identity_hash.copy_from_slice(dest.desc.identity.address_hash.as_slice());
+                            let identity = dest.desc.identity;
+                            let ratchet = event.ratchet;
+                            peer_crypto
+                                .lock()
+                                .expect("peer map")
+                                .insert(
+                                    peer.clone(),
+                                    PeerCrypto {
+                                        identity_hash,
+                                        identity,
+                                        public_key,
+                                        ratchet,
+                                    },
+                                );
+                            eprintln!("[daemon] rx announce peer={}", peer);
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|value| value.as_secs() as i64)
+                                .unwrap_or(0);
+                            let _ = daemon_announce.accept_announce(peer, timestamp);
+                        }
+                    }
+                });
             }
 
             let listener = TcpListener::bind(addr).await.unwrap();
