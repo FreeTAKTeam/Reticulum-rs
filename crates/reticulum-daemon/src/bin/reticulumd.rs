@@ -750,36 +750,9 @@ async fn main() {
                                     data.to_vec()
                                 }
                             };
-                            let mut lxmf_bytes = Vec::with_capacity(
-                                DESTINATION_LENGTH + payload.len(),
-                            );
-                            lxmf_bytes.extend_from_slice(event.destination.as_slice());
-                            lxmf_bytes.extend_from_slice(&payload);
-                            if let Ok(message) = decode_wire_message(&lxmf_bytes) {
-                                let id = lxmf::message::WireMessage::unpack(&lxmf_bytes)
-                                    .ok()
-                                    .map(|wire| wire.message_id())
-                                    .map(hex::encode)
-                                    .unwrap_or_else(|| hex::encode(event.destination.as_slice()));
-                                let record = reticulum::storage::messages::MessageRecord {
-                                    id,
-                                    source: hex::encode(message.source_hash.unwrap_or([0u8; 16])),
-                                    destination: hex::encode(
-                                        message.destination_hash.unwrap_or([0u8; 16]),
-                                    ),
-                                    title: message.title_as_string().unwrap_or_default(),
-                                    content: message.content_as_string().unwrap_or_default(),
-                                    timestamp: message
-                                        .timestamp
-                                        .map(|v| v as i64)
-                                        .unwrap_or(0),
-                                    direction: "in".into(),
-                                    fields: message
-                                        .fields
-                                        .as_ref()
-                                        .and_then(|value| rmpv_to_json(value)),
-                                    receipt_status: None,
-                                };
+                            let mut destination = [0u8; 16];
+                            destination.copy_from_slice(event.destination.as_slice());
+                            if let Some(record) = decode_inbound_payload(destination, &payload) {
                                 let _ = daemon_inbound.accept_inbound(record);
                             }
                         }
