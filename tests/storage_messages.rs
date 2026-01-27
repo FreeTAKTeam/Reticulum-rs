@@ -10,6 +10,8 @@ fn stores_and_reads_message() {
         content: "hi".into(),
         timestamp: 1,
         direction: "in".into(),
+        fields: None,
+        receipt_status: None,
     })
     .unwrap();
     let items = db.list_messages(10, None).unwrap();
@@ -28,6 +30,8 @@ fn opens_disk_store() {
         content: "hello".into(),
         timestamp: 2,
         direction: "in".into(),
+        fields: None,
+        receipt_status: None,
     })
     .unwrap();
     drop(db);
