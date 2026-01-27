@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
 use crate::storage::messages::{MessageRecord, MessagesStore};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::time::Duration;
@@ -35,12 +35,19 @@ pub struct RpcDaemon {
     identity_hash: String,
     events: broadcast::Sender<RpcEvent>,
     event_queue: Mutex<VecDeque<RpcEvent>>,
+    peers: Mutex<HashMap<String, PeerRecord>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct RpcEvent {
     pub event_type: String,
     pub payload: JsonValue,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PeerRecord {
+    pub peer: String,
+    pub last_seen: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +65,12 @@ struct RecordReceiptParams {
     status: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct AnnounceReceivedParams {
+    peer: String,
+    timestamp: Option<i64>,
+}
+
 impl RpcDaemon {
     pub fn with_store(store: MessagesStore, identity_hash: String) -> Self {
         let (events, _rx) = broadcast::channel(64);
@@ -66,6 +79,7 @@ impl RpcDaemon {
             identity_hash,
             events,
             event_queue: Mutex::new(VecDeque::new()),
+            peers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -122,11 +136,20 @@ impl RpcDaemon {
                     error: None,
                 })
             }
-            "list_peers" => Ok(RpcResponse {
-                id: request.id,
-                result: Some(json!({ "peers": [] })),
-                error: None,
-            }),
+            "list_peers" => {
+                let peers = self
+                    .peers
+                    .lock()
+                    .expect("peers mutex poisoned")
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "peers": peers })),
+                    error: None,
+                })
+            }
             "send_message" => {
                 let params = request
                     .params
@@ -225,6 +248,38 @@ impl RpcDaemon {
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "announce_id": request.id })),
+                    error: None,
+                })
+            }
+            "announce_received" => {
+                let params = request
+                    .params
+                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let parsed: AnnounceReceivedParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let timestamp = parsed.timestamp.unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|value| value.as_secs() as i64)
+                        .unwrap_or(0)
+                });
+                let record = PeerRecord {
+                    peer: parsed.peer,
+                    last_seen: timestamp,
+                };
+                {
+                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
+                    guard.insert(record.peer.clone(), record.clone());
+                }
+                let event = RpcEvent {
+                    event_type: "announce_received".into(),
+                    payload: json!({ "peer": record.peer, "timestamp": record.last_seen }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "peer": record })),
                     error: None,
                 })
             }
