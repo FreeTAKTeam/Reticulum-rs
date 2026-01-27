@@ -628,6 +628,15 @@ async fn main() {
                 });
             }
 
+            if transport.is_some() {
+                let daemon_receipts = daemon.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(event) = receipt_rx.recv().await {
+                        let _ = handle_receipt_event(&daemon_receipts, event);
+                    }
+                });
+            }
+
             if args.announce_interval_secs > 0 {
                 let _handle = daemon
                     .clone()
