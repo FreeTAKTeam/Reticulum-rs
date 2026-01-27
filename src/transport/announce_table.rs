@@ -61,7 +61,7 @@ impl AnnounceEntry {
             },
             ifac: None,
             destination: self.packet.destination,
-            transport: Some(transport_id.clone()),
+            transport: Some(*transport_id),
             context,
             data: self.packet.data,
         };
@@ -105,15 +105,15 @@ impl AnnounceCache {
     }
 
     fn get(&self, destination: &AddressHash) -> Option<AnnounceEntry> {
-        if let Some(ref entry) = self.newer.as_ref().unwrap().get(destination) {
-            return Some(AnnounceEntry::clone(entry));
+        if let Some(entry) = self.newer.as_ref().unwrap().get(destination) {
+            return Some(entry.clone());
         }
 
         if let Some(ref older) = self.older {
-            return older.get(destination).map(|entry| entry.clone());
+            return older.get(destination).cloned();
         }
 
-        return None;
+        None
     }
 
     pub fn len(&self) -> usize {
@@ -175,7 +175,7 @@ impl AnnounceTable {
         let hops = announce.header.hops + 1;
 
         let entry = AnnounceEntry {
-            packet: announce.clone(),
+            packet: *announce,
             timestamp: now,
             timeout: now + Duration::from_secs(60),
             received_from,
@@ -233,7 +233,9 @@ impl AnnounceTable {
         transport_id: &AddressHash,
     ) -> Option<TxMessage> {
         // temporary hack
-        self.map.get_mut(dest_hash).map_or(None, |e| e.retransmit(transport_id))
+        self.map
+            .get_mut(dest_hash)
+            .and_then(|e| e.retransmit(transport_id))
     }
 
     pub fn to_retransmit(
@@ -251,13 +253,13 @@ impl AnnounceTable {
             if let Some(message) = entry.retransmit(transport_id) {
                 messages.push(message);
             } else {
-                completed.push(destination.clone());
+                completed.push(*destination);
             }
         }
 
         let n_announces = messages.len();
 
-        for (_, ref mut entry) in &mut self.responses {
+        for ref mut entry in self.responses.values_mut() {
             if let Some(message) = entry.retransmit(transport_id) {
                 messages.push(message);
             }

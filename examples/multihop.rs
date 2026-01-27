@@ -39,7 +39,7 @@ async fn main() {
     log::info!(">>> MULTIHOP EXAMPLE (place in chain: {}/{}) <<<", our_hop, last_hop);
 
     let identity = PrivateIdentity::new_from_rand(OsRng);
-    let transport_id = identity.address_hash().clone();
+    let transport_id = *identity.address_hash();
 
     let last_hop_id = PrivateIdentity::new_from_name("last_hop");
     let last_hop_name = DestinationName::new("last_hop", "app");
@@ -48,7 +48,7 @@ async fn main() {
         last_hop_id.clone(),
         last_hop_name,
     );
-    let last_hop_address = last_hop_destination.desc.address_hash.clone();
+    let last_hop_address = last_hop_destination.desc.address_hash;
 
     log::info!("Destination on last hop will be {}", last_hop_destination.desc);
 
@@ -70,17 +70,18 @@ async fn main() {
             TcpClient::spawn,
         );
 
-        let destination;
-        if our_hop == last_hop {
-            destination = transport.add_destination(
+        let destination = if our_hop == last_hop {
+            transport
+                .add_destination(
                 last_hop_id,
                 last_hop_name
-            ).await;
+            )
+                .await
         } else {
             let id = PrivateIdentity::new_from_rand(OsRng);
             let name = DestinationName::new(&format!("hop-{}", our_hop), "app");
-            destination = transport.add_destination(id, name).await;
-        }
+            transport.add_destination(id, name).await
+        };
 
         log::info!("Created destination {}", destination.lock().await.desc);
 

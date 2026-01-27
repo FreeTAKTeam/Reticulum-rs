@@ -83,7 +83,7 @@ impl RpcDaemon {
     fn store_inbound_record(&self, record: MessageRecord) -> Result<(), std::io::Error> {
         self.store
             .insert_message(&record)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+            .map_err(std::io::Error::other)?;
         let event = RpcEvent {
             event_type: "inbound".into(),
             payload: json!({ "message": record }),
@@ -115,7 +115,7 @@ impl RpcDaemon {
                 let items = self
                     .store
                     .list_messages(100, None)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                    .map_err(std::io::Error::other)?;
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "messages": items })),
@@ -149,7 +149,7 @@ impl RpcDaemon {
                 };
                 self.store
                     .insert_message(&record)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                    .map_err(std::io::Error::other)?;
                 let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
                 Ok(RpcResponse {
                     id: request.id,
@@ -192,7 +192,7 @@ impl RpcDaemon {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 self.store
                     .update_receipt_status(&parsed.message_id, &parsed.status)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?;
+                    .map_err(std::io::Error::other)?;
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "message_id": parsed.message_id, "status": parsed.status })),
@@ -232,7 +232,7 @@ impl RpcDaemon {
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
         let response = self.handle_rpc(request)?;
         codec::encode_frame(&response)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))
+            .map_err(std::io::Error::other)
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<RpcEvent> {
@@ -279,7 +279,7 @@ impl RpcDaemon {
                 interval.tick().await;
                 let id = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as u64)
+                    .map(|value| value.as_secs())
                     .unwrap_or(0);
                 self.schedule_announce_for_test(id);
             }

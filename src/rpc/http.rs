@@ -15,7 +15,7 @@ pub fn handle_http_request(daemon: &RpcDaemon, request: &[u8]) -> io::Result<Vec
         ("GET", "/events") => {
             if let Some(event) = daemon.take_event() {
                 let body = codec::encode_frame(&event)
-                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                    .map_err(io::Error::other)?;
                 Ok(build_response(StatusCode::Ok, &body))
             } else {
                 Ok(build_response(StatusCode::NoContent, &[]))

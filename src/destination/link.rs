@@ -63,12 +63,11 @@ impl LinkPayload {
         Self { buffer, len }
     }
 
-    pub fn new_from_vec(data: &Vec<u8>) -> Self {
+    pub fn new_from_vec(data: &[u8]) -> Self {
         let mut buffer = [0u8; PACKET_MDU];
 
-        for i in 0..min(buffer.len(), data.len()) {
-            buffer[i] = data[i];
-        }
+        let copy_len = min(buffer.len(), data.len());
+        buffer[..copy_len].copy_from_slice(&data[..copy_len]);
 
         Self {
             buffer,
@@ -98,9 +97,9 @@ impl From<&Packet> for LinkId {
 
         AddressHash::new_from_hash(&Hash::new(
             Hash::generator()
-                .chain_update(&[packet.header.to_meta() & 0b00001111])
+                .chain_update([packet.header.to_meta() & 0b00001111])
                 .chain_update(packet.destination.as_slice())
-                .chain_update(&[packet.context as u8])
+                .chain_update([packet.context as u8])
                 .chain_update(hashable_data)
                 .finalize()
                 .into(),
@@ -238,7 +237,7 @@ impl Link {
         packet_data.safe_write(&signature.to_bytes()[..]);
         packet_data.safe_write(self.priv_identity.as_identity().public_key.as_bytes());
 
-        let packet = Packet {
+        Packet {
             header: Header {
                 packet_type: PacketType::Proof,
                 ..Default::default()
@@ -248,9 +247,7 @@ impl Link {
             transport: None,
             context: PacketContext::LinkRequestProof,
             data: packet_data,
-        };
-
-        packet
+        }
     }
 
     fn handle_data_packet(&mut self, packet: &Packet) -> LinkHandleResult {
@@ -320,7 +317,7 @@ impl Link {
             _ => {}
         }
 
-        return LinkHandleResult::None;
+        LinkHandleResult::None
     }
 
     pub fn data_packet(&self, data: &[u8]) -> Result<Packet, RnsError> {
@@ -427,7 +424,7 @@ impl Link {
 
         self.derived_key = self
             .priv_identity
-            .derive_key(&self.peer_identity.public_key, Some(&self.id.as_slice()));
+            .derive_key(&self.peer_identity.public_key, Some(self.id.as_slice()));
     }
 
     fn post_event(&self, event: LinkEvent) {

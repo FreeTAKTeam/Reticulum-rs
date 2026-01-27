@@ -16,7 +16,7 @@ impl<T: std::hash::Hash + Eq + Clone> CacheSet<T> {
     }
 
     pub fn insert(&mut self, value: &T) -> bool {
-        if self.set.contains(&value) {
+        if self.set.contains(value) {
             return false;
         }
 
@@ -29,10 +29,10 @@ impl<T: std::hash::Hash + Eq + Clone> CacheSet<T> {
         self.set.insert(value.clone());
         self.queue.push_back(value.clone());
 
-        return true;
+        true
     }
 
     pub fn contains(&self, value: &T) -> bool {
-        self.set.contains(&value)
+        self.set.contains(value)
     }
 }
