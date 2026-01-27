@@ -151,6 +151,12 @@ impl RpcDaemon {
                     .insert_message(&record)
                     .map_err(std::io::Error::other)?;
                 let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
+                let event = RpcEvent {
+                    event_type: "outbound".into(),
+                    payload: json!({ "message": record }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "message_id": record.id })),
@@ -193,6 +199,12 @@ impl RpcDaemon {
                 self.store
                     .update_receipt_status(&parsed.message_id, &parsed.status)
                     .map_err(std::io::Error::other)?;
+                let event = RpcEvent {
+                    event_type: "receipt".into(),
+                    payload: json!({ "message_id": parsed.message_id, "status": parsed.status }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "message_id": parsed.message_id, "status": parsed.status })),
