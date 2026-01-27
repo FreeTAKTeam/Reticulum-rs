@@ -49,6 +49,7 @@ struct SendMessageParams {
     source: String,
     destination: String,
     content: String,
+    fields: Option<JsonValue>,
 }
 
 impl RpcDaemon {
@@ -110,6 +111,7 @@ impl RpcDaemon {
                     content: parsed.content,
                     timestamp,
                     direction: "out".into(),
+                    fields: parsed.fields,
                 };
                 self.store
                     .insert_message(&record)
@@ -137,6 +139,7 @@ impl RpcDaemon {
                     content: parsed.content,
                     timestamp,
                     direction: "in".into(),
+                    fields: parsed.fields,
                 };
                 self.store
                     .insert_message(&record)
@@ -252,6 +255,7 @@ impl RpcDaemon {
             content: content.into(),
             timestamp,
             direction: "in".into(),
+            fields: None,
         };
         let _ = self.store.insert_message(&record);
         let event = RpcEvent {

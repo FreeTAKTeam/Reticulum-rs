@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MessageRecord {
@@ -8,6 +9,7 @@ pub struct MessageRecord {
     pub content: String,
     pub timestamp: i64,
     pub direction: String,
+    pub fields: Option<JsonValue>,
 }
 
 pub struct MessagesStore {
@@ -30,8 +32,12 @@ impl MessagesStore {
     }
 
     pub fn insert_message(&self, record: &MessageRecord) -> rusqlite::Result<()> {
+        let fields_json = record
+            .fields
+            .as_ref()
+            .map(|value| serde_json::to_string(value).unwrap_or_default());
         self.conn.execute(
-            "INSERT OR REPLACE INTO messages (id, source, destination, content, timestamp, direction) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO messages (id, source, destination, content, timestamp, direction, fields) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 record.id,
                 record.source,
@@ -39,6 +45,7 @@ impl MessagesStore {
                 record.content,
                 record.timestamp,
                 record.direction,
+                fields_json,
             ],
         )?;
         Ok(())
@@ -52,10 +59,14 @@ impl MessagesStore {
         let mut records = Vec::new();
         if let Some(ts) = before_ts {
             let mut stmt = self.conn.prepare(
-                "SELECT id, source, destination, content, timestamp, direction FROM messages WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
+                "SELECT id, source, destination, content, timestamp, direction, fields FROM messages WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
             )?;
             let mut rows = stmt.query(params![ts, limit as i64])?;
             while let Some(row) = rows.next()? {
+                let fields_json: Option<String> = row.get(6)?;
+                let fields = fields_json
+                    .as_ref()
+                    .and_then(|value| serde_json::from_str(value).ok());
                 records.push(MessageRecord {
                     id: row.get(0)?,
                     source: row.get(1)?,
@@ -63,14 +74,19 @@ impl MessagesStore {
                     content: row.get(3)?,
                     timestamp: row.get(4)?,
                     direction: row.get(5)?,
+                    fields,
                 });
             }
         } else {
             let mut stmt = self.conn.prepare(
-                "SELECT id, source, destination, content, timestamp, direction FROM messages ORDER BY timestamp DESC LIMIT ?1",
+                "SELECT id, source, destination, content, timestamp, direction, fields FROM messages ORDER BY timestamp DESC LIMIT ?1",
             )?;
             let mut rows = stmt.query(params![limit as i64])?;
             while let Some(row) = rows.next()? {
+                let fields_json: Option<String> = row.get(6)?;
+                let fields = fields_json
+                    .as_ref()
+                    .and_then(|value| serde_json::from_str(value).ok());
                 records.push(MessageRecord {
                     id: row.get(0)?,
                     source: row.get(1)?,
@@ -78,6 +94,7 @@ impl MessagesStore {
                     content: row.get(3)?,
                     timestamp: row.get(4)?,
                     direction: row.get(5)?,
+                    fields,
                 });
             }
         }
@@ -92,9 +109,13 @@ impl MessagesStore {
                 destination TEXT NOT NULL,
                 content TEXT NOT NULL,
                 timestamp INTEGER NOT NULL,
-                direction TEXT NOT NULL
+                direction TEXT NOT NULL,
+                fields TEXT
             );",
         )?;
+        let _ = self
+            .conn
+            .execute("ALTER TABLE messages ADD COLUMN fields TEXT", []);
         Ok(())
     }
 }
