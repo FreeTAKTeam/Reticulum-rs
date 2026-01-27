@@ -47,3 +47,13 @@ pub fn handle_receipt_event(daemon: &RpcDaemon, event: ReceiptEvent) -> Result<(
     })?;
     Ok(())
 }
+
+pub fn track_receipt_mapping(
+    map: &Arc<Mutex<HashMap<String, String>>>,
+    packet_hash: &str,
+    message_id: &str,
+) {
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(packet_hash.to_string(), message_id.to_string());
+    }
+}

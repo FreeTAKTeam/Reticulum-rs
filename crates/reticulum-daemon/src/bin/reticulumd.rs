@@ -16,11 +16,13 @@ use reticulum::iface::tcp_server::TcpServer;
 use reticulum::rpc::{http, AnnounceBridge, OutboundBridge, RpcDaemon};
 use reticulum::storage::messages::MessagesStore;
 use reticulum::transport::{Transport, TransportConfig};
+use tokio::sync::mpsc::unbounded_channel;
 
 use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
 use reticulum_daemon::inbound_delivery::decode_inbound_payload;
 use reticulum_daemon::lxmf_bridge::build_wire_message;
+use reticulum_daemon::receipt_bridge::{handle_receipt_event, track_receipt_mapping, ReceiptBridge};
 use reticulum_daemon::rns_crypto::decrypt_with_identity;
 use lxmf::constants::DESTINATION_LENGTH;
 
@@ -44,6 +46,7 @@ struct TransportBridge {
     signer: PrivateIdentity,
     announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
     peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
+    receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,12 +63,14 @@ impl TransportBridge {
         signer: PrivateIdentity,
         announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
         peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
+        receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
     ) -> Self {
         Self {
             transport,
             signer,
             announce_destination,
             peer_crypto,
+            receipt_map,
         }
     }
 }
@@ -106,10 +111,7 @@ impl OutboundBridge for TransportBridge {
         )
         .map_err(std::io::Error::other)?;
 
-        let payload = wire
-            .get(DESTINATION_LENGTH..)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "wire too short"))?;
-        let payload = payload.to_vec();
+        let payload = wire;
 
         let destination_desc = reticulum::destination::DestinationDesc {
             identity: peer_info.identity,
@@ -117,14 +119,20 @@ impl OutboundBridge for TransportBridge {
             name: DestinationName::new("lxmf", "delivery"),
         };
         let transport = self.transport.clone();
+        let receipt_map = self.receipt_map.clone();
+        let message_id = record.id.clone();
         tokio::spawn(async move {
-            let _ = send_via_link(
+            let result = send_via_link(
                 transport.as_ref(),
                 destination_desc,
                 &payload,
                 std::time::Duration::from_secs(8),
             )
             .await;
+            if let Ok(packet) = result {
+                let packet_hash = hex::encode(packet.hash().to_bytes());
+                track_receipt_mapping(&receipt_map, &packet_hash, &message_id);
+            }
         });
         Ok(())
     }
@@ -173,10 +181,19 @@ async fn main() {
                 Arc::new(std::sync::Mutex::new(HashMap::new()));
             let mut announce_destination: Option<Arc<tokio::sync::Mutex<SingleInputDestination>>> =
                 None;
+            let receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>> =
+                Arc::new(std::sync::Mutex::new(HashMap::new()));
+            let (receipt_tx, mut receipt_rx) = unbounded_channel();
 
             if let Some(addr) = args.transport.clone() {
                 let config = TransportConfig::new("daemon", &identity, true);
                 let mut transport_instance = Transport::new(config);
+                transport_instance
+                    .set_receipt_handler(Box::new(ReceiptBridge::new(
+                        receipt_map.clone(),
+                        receipt_tx,
+                    )))
+                    .await;
                 let iface_manager = transport_instance.iface_manager();
                 iface_manager
                     .lock()
@@ -207,6 +224,7 @@ async fn main() {
                         identity.clone(),
                         destination.clone(),
                         peer_crypto.clone(),
+                        receipt_map.clone(),
                     ))
                 });
 
@@ -223,6 +241,15 @@ async fn main() {
                 outbound_bridge,
                 announce_bridge,
             ));
+
+            if transport.is_some() {
+                let daemon_receipts = daemon.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(event) = receipt_rx.recv().await {
+                        let _ = handle_receipt_event(&daemon_receipts, event);
+                    }
+                });
+            }
 
             if args.announce_interval_secs > 0 {
                 let _handle = daemon.clone().start_announce_scheduler(args.announce_interval_secs);
