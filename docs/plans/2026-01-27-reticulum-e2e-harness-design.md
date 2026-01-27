@@ -35,3 +35,11 @@ Keep tests lightweight:
 - unit test for minimal RPC request/response parsing helper
 
 Full integration can be added later if desired; the CLI harness itself is designed to be run manually or in CI.
+
+## Usage
+
+```
+cargo run --bin rnx -- e2e --a-port 4243 --b-port 4244 --timeout-secs 5
+```
+
+Note: current harness uses simulated delivery (send on daemon A, then inject on daemon B).
