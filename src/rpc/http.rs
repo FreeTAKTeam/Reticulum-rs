@@ -1,6 +1,6 @@
 use std::io;
 
-use crate::rpc::{handle_framed_request, RpcDaemon};
+use crate::rpc::{codec, handle_framed_request, RpcDaemon};
 
 const HEADER_END: &[u8] = b"\r\n\r\n";
 
@@ -8,15 +8,35 @@ pub fn handle_http_request(daemon: &RpcDaemon, request: &[u8]) -> io::Result<Vec
     let header_end = find_header_end(request)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing headers"))?;
     let headers = &request[..header_end];
-    let content_length = parse_content_length(headers)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing content-length"))?;
     let body_start = header_end + HEADER_END.len();
-    if request.len() < body_start + content_length {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "body incomplete"));
+    let (method, path) = parse_request_line(headers)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid request line"))?;
+    match (method.as_str(), path.as_str()) {
+        ("GET", "/events") => {
+            if let Some(event) = daemon.take_event() {
+                let body = codec::encode_frame(&event)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                Ok(build_response(StatusCode::Ok, &body))
+            } else {
+                Ok(build_response(StatusCode::NoContent, &[]))
+            }
+        }
+        ("POST", "/rpc") => {
+            let content_length = parse_content_length(headers).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "missing content-length")
+            })?;
+            if request.len() < body_start + content_length {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "body incomplete"));
+            }
+            let body = &request[body_start..body_start + content_length];
+            let response_body = handle_framed_request(daemon, body)?;
+            Ok(build_response(StatusCode::Ok, &response_body))
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported request",
+        )),
     }
-    let body = &request[body_start..body_start + content_length];
-    let response_body = handle_framed_request(daemon, body)?;
-    Ok(build_response(StatusCode::Ok, &response_body))
 }
 
 pub fn find_header_end(request: &[u8]) -> Option<usize> {
@@ -39,14 +59,26 @@ pub fn parse_content_length(headers: &[u8]) -> Option<usize> {
     None
 }
 
+fn parse_request_line(headers: &[u8]) -> Option<(String, String)> {
+    let text = String::from_utf8_lossy(headers);
+    let mut lines = text.lines();
+    let line = lines.next()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let path = parts.next()?.to_string();
+    Some((method, path))
+}
+
 enum StatusCode {
     Ok,
+    NoContent,
     BadRequest,
 }
 
 fn build_response(status: StatusCode, body: &[u8]) -> Vec<u8> {
     let status_line = match status {
         StatusCode::Ok => "HTTP/1.1 200 OK",
+        StatusCode::NoContent => "HTTP/1.1 204 No Content",
         StatusCode::BadRequest => "HTTP/1.1 400 Bad Request",
     };
     let mut response = Vec::new();
