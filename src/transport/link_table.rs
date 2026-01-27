@@ -5,6 +5,7 @@ use crate::destination::link::LinkId;
 use crate::hash::AddressHash;
 use crate::packet::{Header, HeaderType, IfacFlag, Packet};
 
+#[allow(dead_code)]
 pub struct LinkEntry {
     pub timestamp: Instant,
     pub proof_timeout: Instant,

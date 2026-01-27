@@ -2,7 +2,7 @@ use alloc::collections::{BTreeSet, BTreeMap};
 
 use rand_core::OsRng;
 
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 
 use crate::destination::DestinationName;
 use crate::destination::PlainInputDestination;
@@ -151,7 +151,7 @@ impl PathRequests {
     fn allow_recursive(
         &mut self,
         destination: &AddressHash,
-        on_iface: Option<AddressHash>,
+        _on_iface: Option<AddressHash>,
     ) -> bool {
         let now = Instant::now();
 

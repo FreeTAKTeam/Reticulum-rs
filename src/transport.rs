@@ -39,7 +39,6 @@ use crate::iface::TxMessage;
 use crate::iface::TxMessageType;
 
 use crate::packet::DestinationType;
-use crate::packet::Header;
 use crate::packet::Packet;
 use crate::packet::PacketContext;
 use crate::packet::PacketDataBuffer;
@@ -146,7 +145,7 @@ pub struct AnnounceEvent {
     pub app_data: PacketDataBuffer,
 }
 
-struct TransportHandler {
+pub(crate) struct TransportHandler {
     config: TransportConfig,
     iface_manager: Arc<Mutex<InterfaceManager>>,
     announce_tx: broadcast::Sender<AnnounceEvent>,
@@ -546,7 +545,8 @@ impl Transport {
         self.handler.lock().await.knows_destination(address)
     }
 
-    pub fn get_handler(&self) -> Arc<Mutex<TransportHandler>> {
+    #[cfg(test)]
+    pub(crate) fn get_handler(&self) -> Arc<Mutex<TransportHandler>> {
         // direct access to handler for testing purposes
         self.handler.clone()
     }
@@ -602,8 +602,7 @@ impl TransportHandler {
                         }
                     }
                 }
-            },
-            _ => {}
+            }
         }
 
         let is_new = self.packet_cache.lock().await.update(packet);
@@ -1006,7 +1005,7 @@ async fn handle_link_request_as_intermediate<'a>(
 async fn handle_link_request<'a>(
     packet: &Packet,
     iface: AddressHash,
-    mut handler: MutexGuard<'a, TransportHandler>
+    handler: MutexGuard<'a, TransportHandler>
 ) {
     if let Some(destination) = handler
         .single_in_destinations
@@ -1114,24 +1113,6 @@ async fn retransmit_announces<'a>(mut handler: MutexGuard<'a, TransportHandler>)
 
     for message in messages {
         handler.send(message).await;
-    }
-}
-
-fn create_retransmit_packet(packet: &Packet) -> Packet {
-    Packet {
-        header: Header {
-            ifac_flag: packet.header.ifac_flag,
-            header_type: packet.header.header_type,
-            propagation_type: packet.header.propagation_type,
-            destination_type: packet.header.destination_type,
-            packet_type: packet.header.packet_type,
-            hops: packet.header.hops + 1,
-        },
-        ifac: packet.ifac,
-        destination: packet.destination,
-        transport: packet.transport,
-        context: packet.context,
-        data: packet.data,
     }
 }
 
@@ -1357,8 +1338,8 @@ mod tests {
         let transport = Transport::new(config);
         let handler = transport.get_handler();
 
-        let source1 = AddressHash::new_from_slice(&[1u8; 32]);
-        let source2 = AddressHash::new_from_slice(&[2u8; 32]);
+        let _source1 = AddressHash::new_from_slice(&[1u8; 32]);
+        let _source2 = AddressHash::new_from_slice(&[2u8; 32]);
         let next_hop_iface = AddressHash::new_from_slice(&[3u8; 32]);
         let destination = AddressHash::new_from_slice(&[4u8; 32]);
 
@@ -1375,7 +1356,7 @@ mod tests {
         let mut data_packet: Packet = Default::default();
         data_packet.data = PacketDataBuffer::new_from_slice(b"foo");
         data_packet.destination = destination;
-        let mut duplicate: Packet = data_packet.clone();
+        let duplicate: Packet = data_packet.clone();
 
         let mut different_packet = data_packet.clone();
         different_packet.data = PacketDataBuffer::new_from_slice(b"bar");
