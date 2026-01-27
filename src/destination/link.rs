@@ -126,7 +126,7 @@ pub enum LinkHandleResult {
 #[derive(Clone)]
 pub enum LinkEvent {
     Activated,
-    Data(LinkPayload),
+    Data(Box<LinkPayload>),
     Closed,
 }
 
@@ -271,18 +271,18 @@ impl Link {
                 if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
                     log::trace!("link({}): data {}B", self.id, plain_text.len());
                     self.request_time = Instant::now();
-                    self.post_event(LinkEvent::Data(LinkPayload::new_from_slice(plain_text)));
+                    self.post_event(LinkEvent::Data(Box::new(LinkPayload::new_from_slice(plain_text))));
                 } else {
                     log::error!("link({}): can't decrypt packet", self.id);
                 }
             }
             PacketContext::KeepAlive => {
-                if packet.data.len() >= 1 && packet.data.as_slice()[0] == 0xFF {
+                if !packet.data.is_empty() && packet.data.as_slice()[0] == 0xFF {
                     self.request_time = Instant::now();
                     log::trace!("link({}): keep-alive request", self.id);
                     return LinkHandleResult::KeepAlive;
                 }
-                if packet.data.len() >= 1 && packet.data.as_slice()[0] == 0xFE {
+                if !packet.data.is_empty() && packet.data.as_slice()[0] == 0xFE {
                     log::trace!("link({}): keep-alive response", self.id);
                     self.request_time = Instant::now();
                     return LinkHandleResult::None;
