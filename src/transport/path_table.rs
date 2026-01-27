@@ -26,6 +26,10 @@ impl PathTable {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn to_msgpack(&self) -> Result<Vec<u8>, RnsError> {
         if !self.map.is_empty() {
             return Err(RnsError::InvalidArgument);
@@ -161,5 +165,11 @@ impl PathTable {
             },
             Some(entry.iface),
         )
+    }
+}
+
+impl Default for PathTable {
+    fn default() -> Self {
+        Self::new()
     }
 }

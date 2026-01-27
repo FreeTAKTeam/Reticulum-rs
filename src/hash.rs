@@ -134,6 +134,10 @@ impl AddressHash {
         self.0.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|byte| *byte == 0)
+    }
+
     pub fn to_hex_string(&self) -> String {
         let mut hex_string = String::with_capacity(ADDRESS_HASH_SIZE * 2);
 
@@ -148,6 +152,12 @@ impl AddressHash {
 impl From<Hash> for AddressHash {
     fn from(hash: Hash) -> Self {
         Self::new_from_hash(&hash)
+    }
+}
+
+impl Default for AddressHash {
+    fn default() -> Self {
+        Self::new_empty()
     }
 }
 

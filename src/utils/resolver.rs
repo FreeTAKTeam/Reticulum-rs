@@ -24,4 +24,8 @@ impl Resolver {
     pub fn len(&self) -> usize {
         self.cache.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
 }

@@ -122,6 +122,10 @@ impl AnnounceCache {
         newer_len + older_len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn evict_one(&mut self) {
         if let Some(ref mut older) = self.older {
             if let Some(first_key) = older.keys().next().cloned() {
@@ -159,6 +163,10 @@ impl AnnounceTable {
             responses: BTreeMap::new(),
             cache: AnnounceCache::new(100000), // TODO make capacity configurable
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty() && self.responses.is_empty() && self.cache.is_empty()
     }
 
     pub fn add(
@@ -285,5 +293,11 @@ impl AnnounceTable {
         }
 
         messages
+    }
+}
+
+impl Default for AnnounceTable {
+    fn default() -> Self {
+        Self::new()
     }
 }

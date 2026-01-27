@@ -26,4 +26,14 @@ impl LinkMap {
     pub fn remove(&mut self, address: &AddressHash) {
         self.map.remove(address);
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
+impl Default for LinkMap {
+    fn default() -> Self {
+        Self::new()
+    }
 }

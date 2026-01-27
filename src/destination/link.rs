@@ -79,8 +79,18 @@ impl LinkPayload {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.buffer[..self.len]
+    }
+}
+
+impl Default for LinkPayload {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
