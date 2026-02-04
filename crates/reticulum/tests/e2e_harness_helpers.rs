@@ -5,6 +5,8 @@ use reticulum::e2e_harness::{build_rpc_frame, parse_rpc_frame};
 use reticulum::e2e_harness::{build_receive_params, build_send_params, simulated_delivery_notice};
 use reticulum::e2e_harness::message_present;
 use reticulum::e2e_harness::timestamp_millis;
+use reticulum::e2e_harness::{build_announce_params, peer_present};
+use reticulum::e2e_harness::simulated_announce_notice;
 use reticulum::e2e_harness::{build_daemon_args, Cli, Command};
 use clap::Parser;
 use serde_json::json;
@@ -103,6 +105,37 @@ fn timestamp_millis_is_nonzero() {
 }
 
 #[test]
+fn announce_params_include_peer() {
+    let params = build_announce_params("peer-123", Some(42));
+    assert_eq!(params["peer"], "peer-123");
+    assert_eq!(params["timestamp"], 42);
+}
+
+#[test]
+fn peer_present_detects_peer() {
+    let response = reticulum::rpc::RpcResponse {
+        id: 1,
+        result: Some(serde_json::json!({
+            "peers": [
+                {"peer": "peer-a"},
+                {"peer": "peer-b"}
+            ]
+        })),
+        error: None,
+    };
+    assert!(peer_present(&response, "peer-b"));
+    assert!(!peer_present(&response, "peer-missing"));
+}
+
+#[test]
+fn simulated_announce_notice_mentions_simulated() {
+    let note = simulated_announce_notice("127.0.0.1:4243", "127.0.0.1:4244");
+    assert!(note.to_lowercase().contains("simulated"));
+    assert!(note.contains("4243"));
+    assert!(note.contains("4244"));
+}
+
+#[test]
 fn cli_parses_e2e() {
     let cli = Cli::parse_from(["rnx", "e2e"]);
     assert!(matches!(cli.command, Command::E2e { .. }));
@@ -110,9 +143,21 @@ fn cli_parses_e2e() {
 
 #[test]
 fn daemon_args_include_rpc_and_db() {
-    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0);
+    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0, None);
     assert!(args.contains(&"--rpc".to_string()));
     assert!(args.contains(&"127.0.0.1:4243".to_string()));
     assert!(args.contains(&"--db".to_string()));
     assert!(args.contains(&"db.sqlite".to_string()));
+}
+
+#[test]
+fn daemon_args_include_transport_when_set() {
+    let args = build_daemon_args(
+        "127.0.0.1:4243",
+        "db.sqlite",
+        0,
+        Some("0.0.0.0:4242"),
+    );
+    assert!(args.contains(&"--transport".to_string()));
+    assert!(args.contains(&"0.0.0.0:4242".to_string()));
 }

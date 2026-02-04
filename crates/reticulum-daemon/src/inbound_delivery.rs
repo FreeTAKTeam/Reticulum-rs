@@ -3,12 +3,17 @@ use reticulum::storage::messages::MessageRecord;
 use crate::lxmf_bridge::{decode_wire_message, rmpv_to_json};
 
 pub fn decode_inbound_payload(destination: [u8; 16], payload: &[u8]) -> Option<MessageRecord> {
-    let mut lxmf_bytes = Vec::with_capacity(16 + payload.len());
-    lxmf_bytes.extend_from_slice(&destination);
-    lxmf_bytes.extend_from_slice(payload);
-
-    let message = decode_wire_message(&lxmf_bytes).ok()?;
-    let id = lxmf::message::WireMessage::unpack(&lxmf_bytes)
+    let (message, raw_bytes) = match decode_wire_message(payload) {
+        Ok(message) => (message, payload.to_vec()),
+        Err(_) => {
+            let mut lxmf_bytes = Vec::with_capacity(16 + payload.len());
+            lxmf_bytes.extend_from_slice(&destination);
+            lxmf_bytes.extend_from_slice(payload);
+            let message = decode_wire_message(&lxmf_bytes).ok()?;
+            (message, lxmf_bytes)
+        }
+    };
+    let id = lxmf::message::WireMessage::unpack(&raw_bytes)
         .ok()
         .map(|wire| wire.message_id())
         .map(hex::encode)

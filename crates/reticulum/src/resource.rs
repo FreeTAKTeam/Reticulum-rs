@@ -6,7 +6,7 @@ use sha2::Digest;
 
 use crate::destination::link::Link;
 use crate::error::RnsError;
-use crate::hash::{Hash, HASH_SIZE};
+use crate::hash::{AddressHash, Hash, HASH_SIZE};
 use crate::packet::{Header, Packet, PacketContext, PacketDataBuffer, PacketType, PACKET_MDU};
 use crate::packet::DestinationType;
 
@@ -22,6 +22,8 @@ const FLAG_SPLIT: u8 = 0x04;
 const FLAG_REQUEST: u8 = 0x08;
 const FLAG_RESPONSE: u8 = 0x10;
 const FLAG_METADATA: u8 = 0x20;
+
+const METADATA_MAX_SIZE: usize = 16 * 1024 * 1024 - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResourceStatus {
@@ -46,6 +48,14 @@ pub struct ResourceAdvertisement {
     pub request_id: Option<u64>,
     pub flags: u8,
     pub hashmap: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceEvent {
+    pub hash: Hash,
+    pub link_id: AddressHash,
+    pub data: Vec<u8>,
+    pub metadata: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -265,25 +275,43 @@ struct ResourceSender {
     map_hashes: Vec<[u8; MAPHASH_LEN]>,
     expected_proof: Hash,
     data_size: u64,
+    has_metadata: bool,
+    metadata: Option<Vec<u8>>,
     status: ResourceStatus,
 }
 
 impl ResourceSender {
-    fn new(link: &Link, data: Vec<u8>) -> Result<Self, RnsError> {
+    fn new(link: &Link, data: Vec<u8>, metadata: Option<Vec<u8>>) -> Result<Self, RnsError> {
+        let has_metadata = metadata.is_some();
+        let metadata_prefix = if let Some(payload) = metadata.as_ref() {
+            if payload.len() > METADATA_MAX_SIZE {
+                return Err(RnsError::InvalidArgument);
+            }
+            let size = payload.len() as u32;
+            let size_bytes = size.to_be_bytes();
+            let mut prefix = Vec::with_capacity(3 + payload.len());
+            prefix.extend_from_slice(&size_bytes[1..]);
+            prefix.extend_from_slice(payload);
+            prefix
+        } else {
+            Vec::new()
+        };
+        let mut combined = metadata_prefix.clone();
+        combined.extend_from_slice(&data);
         let random_hash = random_bytes::<RANDOM_HASH_SIZE>();
-        let data_size = data.len() as u64;
+        let data_size = combined.len() as u64;
         let mut hasher = sha2::Sha256::new();
-        hasher.update(&data);
+        hasher.update(&combined);
         hasher.update(&random_hash);
         let resource_hash = Hash::new(copy_hash(&hasher.finalize())?);
 
         let mut proof_hasher = sha2::Sha256::new();
-        proof_hasher.update(&data);
+        proof_hasher.update(&combined);
         proof_hasher.update(resource_hash.as_slice());
         let expected_proof = Hash::new(copy_hash(&proof_hasher.finalize())?);
 
         let mut prefix = random_bytes::<RANDOM_HASH_SIZE>().to_vec();
-        prefix.extend_from_slice(&data);
+        prefix.extend_from_slice(&combined);
 
         let mut cipher_buf = vec![0u8; prefix.len() + 128];
         let cipher = link
@@ -309,12 +337,18 @@ impl ResourceSender {
             map_hashes,
             expected_proof,
             data_size,
+            has_metadata,
+            metadata,
             status: ResourceStatus::Advertised,
         })
     }
 
     fn advertisement(&self, segment: usize) -> ResourceAdvertisement {
         let hashmap = slice_hashmap_segment(&self.map_hashes, segment);
+        let mut flags = FLAG_ENCRYPTED;
+        if self.has_metadata {
+            flags |= FLAG_METADATA;
+        }
         ResourceAdvertisement {
             transfer_size: self.parts.iter().map(|part| part.len() as u64).sum(),
             data_size: self.data_size,
@@ -325,7 +359,7 @@ impl ResourceSender {
             segment_index: segment as u32 + 1,
             total_segments: 1,
             request_id: None,
-            flags: FLAG_ENCRYPTED,
+            flags,
             hashmap,
         }
     }
@@ -400,13 +434,20 @@ struct ResourceReceiver {
     received: usize,
     encrypted: bool,
     compressed: bool,
+    has_metadata: bool,
     status: ResourceStatus,
+}
+
+#[derive(Debug, Clone)]
+struct ResourcePayload {
+    data: Vec<u8>,
+    metadata: Option<Vec<u8>>,
 }
 
 enum PartOutcome {
     NoMatch,
     Incomplete,
-    Complete(Packet),
+    Complete(Packet, ResourcePayload),
 }
 
 impl ResourceReceiver {
@@ -420,6 +461,7 @@ impl ResourceReceiver {
             received: 0,
             encrypted: adv.encrypted(),
             compressed: adv.compressed(),
+            has_metadata: (adv.flags & FLAG_METADATA) == FLAG_METADATA,
             status: ResourceStatus::Advertised,
         };
         receiver.apply_hashmap_segment(adv.segment_index.saturating_sub(1) as usize, &adv.hashmap);
@@ -513,26 +555,41 @@ impl ResourceReceiver {
                 stream
             };
 
-            let payload = if plain.len() > RANDOM_HASH_SIZE {
-                plain[RANDOM_HASH_SIZE..].to_vec()
-            } else {
-                Vec::new()
-            };
+                let payload = if plain.len() > RANDOM_HASH_SIZE {
+                    plain[RANDOM_HASH_SIZE..].to_vec()
+                } else {
+                    Vec::new()
+                };
 
-            let mut hasher = sha2::Sha256::new();
-            hasher.update(&payload);
-            hasher.update(&self.random_hash);
-            let computed = match copy_hash(&hasher.finalize()) {
-                Ok(hash) => Hash::new(hash),
-                Err(_) => {
-                    self.status = ResourceStatus::Failed;
+                let (metadata, data_payload) = if self.has_metadata && payload.len() >= 3 {
+                    let size = ((payload[0] as usize) << 16)
+                        | ((payload[1] as usize) << 8)
+                        | payload[2] as usize;
+                    if payload.len() >= 3 + size {
+                        let meta = payload[3..3 + size].to_vec();
+                        let data = payload[3 + size..].to_vec();
+                        (Some(meta), data)
+                    } else {
+                        (None, payload)
+                    }
+                } else {
+                    (None, payload)
+                };
+
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(&data_payload);
+                hasher.update(&self.random_hash);
+                let computed = match copy_hash(&hasher.finalize()) {
+                    Ok(hash) => Hash::new(hash),
+                    Err(_) => {
+                        self.status = ResourceStatus::Failed;
                     return PartOutcome::Incomplete;
                 }
             };
 
             if computed == self.resource_hash {
                 let mut proof_hasher = sha2::Sha256::new();
-                proof_hasher.update(&payload);
+                proof_hasher.update(&data_payload);
                 proof_hasher.update(self.resource_hash.as_slice());
                 let proof = match copy_hash(&proof_hasher.finalize()) {
                     Ok(hash) => Hash::new(hash),
@@ -546,12 +603,18 @@ impl ResourceReceiver {
                     proof,
                 };
                 self.status = ResourceStatus::Complete;
-                return PartOutcome::Complete(build_link_packet(
-                    link,
-                    PacketType::Proof,
-                    PacketContext::ResourceProof,
-                    &proof_payload.encode(),
-                ));
+                return PartOutcome::Complete(
+                    build_link_packet(
+                        link,
+                        PacketType::Proof,
+                        PacketContext::ResourceProof,
+                        &proof_payload.encode(),
+                    ),
+                    ResourcePayload {
+                        data: data_payload,
+                        metadata,
+                    },
+                );
             } else {
                 self.status = ResourceStatus::Failed;
             }
@@ -565,6 +628,7 @@ impl ResourceReceiver {
 pub struct ResourceManager {
     outgoing: HashMap<Hash, ResourceSender>,
     incoming: HashMap<Hash, ResourceReceiver>,
+    events: Vec<ResourceEvent>,
 }
 
 impl ResourceManager {
@@ -572,8 +636,13 @@ impl ResourceManager {
         Self::default()
     }
 
-    pub fn start_send(&mut self, link: &Link, data: Vec<u8>) -> Result<(Hash, Packet), RnsError> {
-        let sender = ResourceSender::new(link, data)?;
+    pub fn start_send(
+        &mut self,
+        link: &Link,
+        data: Vec<u8>,
+        metadata: Option<Vec<u8>>,
+    ) -> Result<(Hash, Packet), RnsError> {
+        let sender = ResourceSender::new(link, data, metadata)?;
         let resource_hash = sender.resource_hash;
         let advertisement = sender.advertisement(0);
         let payload = advertisement.pack()?;
@@ -585,6 +654,10 @@ impl ResourceManager {
         );
         self.outgoing.insert(resource_hash, sender);
         Ok((resource_hash, packet))
+    }
+
+    pub fn drain_events(&mut self) -> Vec<ResourceEvent> {
+        std::mem::take(&mut self.events)
     }
 
     pub fn handle_packet(&mut self, packet: &Packet, link: &mut Link) -> Vec<Packet> {
@@ -649,12 +722,14 @@ impl ResourceManager {
         let mut completed: Option<Hash> = None;
         let mut proof_packet: Option<Packet> = None;
         let mut request_packet: Option<Packet> = None;
+        let mut payload: Option<ResourcePayload> = None;
         for (hash, receiver) in self.incoming.iter_mut() {
             match receiver.handle_part(packet.data.as_slice(), link) {
                 PartOutcome::NoMatch => continue,
-                PartOutcome::Complete(packet) => {
+                PartOutcome::Complete(packet, data_payload) => {
                     completed = Some(*hash);
                     proof_packet = Some(packet);
+                    payload = Some(data_payload);
                     break;
                 }
                 PartOutcome::Incomplete => {
@@ -671,6 +746,14 @@ impl ResourceManager {
         }
         if let Some(hash) = completed {
             self.incoming.remove(&hash);
+            if let Some(payload) = payload {
+                self.events.push(ResourceEvent {
+                    hash,
+                    link_id: *link.id(),
+                    data: payload.data,
+                    metadata: payload.metadata,
+                });
+            }
         }
         if let Some(packet) = proof_packet {
             return vec![packet];

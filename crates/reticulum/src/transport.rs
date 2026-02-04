@@ -45,7 +45,7 @@ use crate::packet::Packet;
 use crate::packet::PacketContext;
 use crate::packet::PacketDataBuffer;
 use crate::packet::PacketType;
-use crate::resource::ResourceManager;
+use crate::resource::{ResourceEvent, ResourceManager};
 
 mod announce_limits;
 pub mod announce_table;
@@ -174,6 +174,7 @@ pub(crate) struct TransportHandler {
     received_data_tx: broadcast::Sender<ReceivedData>,
 
     resource_manager: ResourceManager,
+    resource_events_tx: broadcast::Sender<ResourceEvent>,
 
     fixed_dest_path_requests: AddressHash,
 
@@ -187,6 +188,7 @@ pub struct Transport {
     link_out_event_tx: broadcast::Sender<LinkEventData>,
     received_data_tx: broadcast::Sender<ReceivedData>,
     iface_messages_tx: broadcast::Sender<RxMessage>,
+    resource_events_tx: broadcast::Sender<ResourceEvent>,
     handler: Arc<Mutex<TransportHandler>>,
     iface_manager: Arc<Mutex<InterfaceManager>>,
     cancel: CancellationToken,
@@ -228,6 +230,7 @@ impl Transport {
         let (link_out_event_tx, _) = tokio::sync::broadcast::channel(16);
         let (received_data_tx, _) = tokio::sync::broadcast::channel(16);
         let (iface_messages_tx, _) = tokio::sync::broadcast::channel(16);
+        let (resource_events_tx, _) = tokio::sync::broadcast::channel(16);
 
         let iface_manager = InterfaceManager::new(16);
 
@@ -263,6 +266,7 @@ impl Transport {
             link_in_event_tx: link_in_event_tx.clone(),
             received_data_tx: received_data_tx.clone(),
             resource_manager: ResourceManager::new(),
+            resource_events_tx: resource_events_tx.clone(),
             fixed_dest_path_requests: path_request_dest,
             cancel: cancel.clone(),
             receipt_handler: None,
@@ -304,6 +308,7 @@ impl Transport {
             link_out_event_tx,
             received_data_tx,
             iface_messages_tx,
+            resource_events_tx,
             handler,
             cancel,
         }
@@ -331,6 +336,10 @@ impl Transport {
 
     pub fn iface_rx(&self) -> broadcast::Receiver<RxMessage> {
         self.iface_messages_tx.subscribe()
+    }
+
+    pub fn resource_events(&self) -> broadcast::Receiver<ResourceEvent> {
+        self.resource_events_tx.subscribe()
     }
 
     pub async fn recv_announces(&self) -> broadcast::Receiver<AnnounceEvent> {
@@ -478,6 +487,7 @@ impl Transport {
         &self,
         link_id: &AddressHash,
         data: Vec<u8>,
+        metadata: Option<Vec<u8>>,
     ) -> Result<Hash, RnsError> {
         let link = {
             let handler = self.handler.lock().await;
@@ -491,7 +501,8 @@ impl Transport {
         let link = link.ok_or(RnsError::InvalidArgument)?;
         let mut handler = self.handler.lock().await;
         let link_guard = link.lock().await;
-        let (resource_hash, packet) = handler.resource_manager.start_send(&link_guard, data)?;
+        let (resource_hash, packet) =
+            handler.resource_manager.start_send(&link_guard, data, metadata)?;
         drop(link_guard);
         handler.send_packet(packet).await;
         Ok(resource_hash)
@@ -833,9 +844,13 @@ async fn handle_data<'a>(packet: &Packet, mut handler: MutexGuard<'a, TransportH
             if let Some(link) = link {
                 let mut link = link.lock().await;
                 let responses = handler.resource_manager.handle_packet(packet, &mut link);
+                let events = handler.resource_manager.drain_events();
                 drop(link);
                 for response in responses {
                     handler.send_packet(response).await;
+                }
+                for event in events {
+                    let _ = handler.resource_events_tx.send(event);
                 }
                 return;
             }

@@ -90,15 +90,27 @@ pub fn parse_http_response_body(response: &[u8]) -> io::Result<Vec<u8>> {
     Ok(response[body_start..body_start + content_length].to_vec())
 }
 
-pub fn build_daemon_args(rpc: &str, db_path: &str, announce_interval_secs: u64) -> Vec<String> {
-    vec![
+pub fn build_daemon_args(
+    rpc: &str,
+    db_path: &str,
+    announce_interval_secs: u64,
+    transport: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
         "--rpc".to_string(),
         rpc.to_string(),
         "--db".to_string(),
         db_path.to_string(),
         "--announce-interval-secs".to_string(),
         announce_interval_secs.to_string(),
-    ]
+    ];
+
+    if let Some(transport) = transport {
+        args.push("--transport".to_string());
+        args.push(transport.to_string());
+    }
+
+    args
 }
 
 pub fn build_send_params(
@@ -158,4 +170,27 @@ pub fn timestamp_millis() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis())
         .unwrap_or(0)
+}
+
+pub fn build_announce_params(peer: &str, timestamp: Option<i64>) -> serde_json::Value {
+    serde_json::json!({
+        "peer": peer,
+        "timestamp": timestamp,
+    })
+}
+
+pub fn peer_present(response: &crate::rpc::RpcResponse, peer: &str) -> bool {
+    let Some(result) = response.result.as_ref() else {
+        return false;
+    };
+    let Some(peers) = result.get("peers").and_then(|value| value.as_array()) else {
+        return false;
+    };
+    peers.iter().any(|entry| {
+        entry.get("peer").and_then(|value| value.as_str()) == Some(peer)
+    })
+}
+
+pub fn simulated_announce_notice(a_rpc: &str, b_rpc: &str) -> String {
+    format!("Simulated announce delivery: {} -> {}", a_rpc, b_rpc)
 }

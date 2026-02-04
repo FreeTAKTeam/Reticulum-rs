@@ -75,6 +75,7 @@ pub fn group_decrypt(key: &[u8; 16], data: &[u8]) -> Result<Vec<u8>, RnsError> {
 
 pub const NAME_HASH_LENGTH: usize = 10;
 pub const RAND_HASH_LENGTH: usize = 10;
+pub const RATCHET_LENGTH: usize = PUBLIC_KEY_LENGTH;
 pub const MIN_ANNOUNCE_DATA_LENGTH: usize =
     PUBLIC_KEY_LENGTH * 2 + NAME_HASH_LENGTH + RAND_HASH_LENGTH + SIGNATURE_LENGTH;
 
@@ -128,8 +129,14 @@ impl fmt::Display for DestinationDesc {
 
 pub type DestinationAnnounce = Packet;
 
+pub struct AnnounceInfo<'a> {
+    pub destination: SingleOutputDestination,
+    pub app_data: &'a [u8],
+    pub ratchet: Option<[u8; RATCHET_LENGTH]>,
+}
+
 impl DestinationAnnounce {
-    pub fn validate(packet: &Packet) -> Result<(SingleOutputDestination, &[u8]), RnsError> {
+    pub fn validate(packet: &Packet) -> Result<AnnounceInfo<'_>, RnsError> {
         if packet.header.packet_type != PacketType::Announce {
             return Err(RnsError::PacketError);
         }
@@ -163,31 +170,80 @@ impl DestinationAnnounce {
         offset += NAME_HASH_LENGTH;
         let rand_hash = &announce_data[offset..(offset + RAND_HASH_LENGTH)];
         offset += RAND_HASH_LENGTH;
-        let signature = &announce_data[offset..(offset + SIGNATURE_LENGTH)];
-        offset += SIGNATURE_LENGTH;
-        let app_data = &announce_data[offset..];
-
         let destination = &packet.destination;
+        let expected_hash =
+            create_address_hash(&identity, &DestinationName::new_from_hash_slice(name_hash));
+        if expected_hash != *destination {
+            eprintln!(
+                "[announce] dest mismatch expected={} got={}",
+                expected_hash,
+                destination
+            );
+        }
 
-        // Keeping signed data on stack is only option for now.
-        // Verification function doesn't support prehashed message.
-        let signed_data = PacketDataBuffer::new()
-            .chain_write(destination.as_slice())?
-            .chain_write(public_key.as_bytes())?
-            .chain_write(verifying_key.as_bytes())?
-            .chain_write(name_hash)?
-            .chain_write(rand_hash)?
-            .chain_write(app_data)?
-            .finalize();
+        let verify_announce = |ratchet: Option<&[u8]>,
+                               signature: &[u8],
+                               app_data: &[u8]|
+         -> Result<(), RnsError> {
+            // Keeping signed data on stack is only option for now.
+            // Verification function doesn't support prehashed message.
+            let mut signed_data = PacketDataBuffer::new();
+            signed_data
+                .chain_write(destination.as_slice())?
+                .chain_write(public_key.as_bytes())?
+                .chain_write(verifying_key.as_bytes())?
+                .chain_write(name_hash)?
+                .chain_write(rand_hash)?;
+            if let Some(ratchet) = ratchet {
+                signed_data.chain_write(ratchet)?;
+            }
+            if !app_data.is_empty() {
+                signed_data.chain_write(app_data)?;
+            }
+            let signature =
+                Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+            identity
+                .verify(signed_data.as_slice(), &signature)
+                .map_err(|_| RnsError::IncorrectSignature)
+        };
 
-        let signature = Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+        let remaining = announce_data.len().saturating_sub(offset);
+        if remaining < SIGNATURE_LENGTH {
+            return Err(RnsError::OutOfMemory);
+        }
 
-        identity.verify(signed_data.as_slice(), &signature)?;
+        if remaining >= SIGNATURE_LENGTH + RATCHET_LENGTH {
+            let ratchet = &announce_data[offset..offset + RATCHET_LENGTH];
+            let sig_start = offset + RATCHET_LENGTH;
+            let sig_end = sig_start + SIGNATURE_LENGTH;
+            let signature = &announce_data[sig_start..sig_end];
+            let app_data = &announce_data[sig_end..];
+            if verify_announce(Some(ratchet), signature, app_data).is_ok() {
+                let mut ratchet_bytes = [0u8; RATCHET_LENGTH];
+                ratchet_bytes.copy_from_slice(ratchet);
+                return Ok(AnnounceInfo {
+                    destination: SingleOutputDestination::new(
+                        identity,
+                        DestinationName::new_from_hash_slice(name_hash),
+                    ),
+                    app_data,
+                    ratchet: Some(ratchet_bytes),
+                });
+            }
+        }
 
-        Ok((
-            SingleOutputDestination::new(identity, DestinationName::new_from_hash_slice(name_hash)),
+        let signature = &announce_data[offset..(offset + SIGNATURE_LENGTH)];
+        let app_data = &announce_data[(offset + SIGNATURE_LENGTH)..];
+        verify_announce(None, signature, app_data)?;
+
+        Ok(AnnounceInfo {
+            destination: SingleOutputDestination::new(
+                identity,
+                DestinationName::new_from_hash_slice(name_hash),
+            ),
             app_data,
-        ))
+            ratchet: None,
+        })
     }
 }
 

@@ -1,8 +1,9 @@
 use clap::Parser;
 use reticulum::e2e_harness::{
-    build_http_post, build_receive_params, build_rpc_frame, build_send_params, build_daemon_args,
-    is_ready_line, message_present, parse_http_response_body, parse_rpc_frame,
-    simulated_delivery_notice, timestamp_millis, Cli, Command,
+    build_announce_params, build_http_post, build_receive_params, build_rpc_frame,
+    build_send_params, build_daemon_args, is_ready_line, message_present, parse_http_response_body,
+    parse_rpc_frame, peer_present, simulated_announce_notice, simulated_delivery_notice,
+    timestamp_millis, Cli, Command,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -82,15 +83,44 @@ fn run_e2e(a_port: u16, b_port: u16, timeout_secs: u64, keep: bool) -> io::Resul
         ));
     }
 
+    let peer_id = format!("peer-{}", timestamp_millis());
+    println!("{}", simulated_announce_notice(&a_rpc, &b_rpc));
+
+    let announce_attempt = rpc_call(&a_rpc, req_id, "announce_now", None);
+    req_id = req_id.wrapping_add(1);
+    if announce_attempt.is_err() {
+        eprintln!("announce_now not supported; skipping direct announce");
+    }
+
+    let announce_params = build_announce_params(&peer_id, None);
+    rpc_call(&b_rpc, req_id, "announce_received", Some(announce_params))?;
+    req_id = req_id.wrapping_add(1);
+
+    let peer_seen = poll_for_peer(&b_rpc, &peer_id, timeout, req_id)?;
+    if !peer_seen {
+        cleanup_child(&mut a_child, keep);
+        cleanup_child(&mut b_child, keep);
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "announce not delivered",
+        ));
+    }
+
     cleanup_child(&mut a_child, keep);
     cleanup_child(&mut b_child, keep);
     println!("E2E ok: message {} delivered", message_id);
+    println!("E2E ok: announce {} observed", peer_id);
     Ok(())
 }
 
 fn spawn_daemon(rpc: &str, db_path: &PathBuf) -> io::Result<Child> {
     let mut cmd = ProcessCommand::new(reticulumd_path()?);
-    cmd.args(build_daemon_args(rpc, &db_path.to_string_lossy(), 0));
+    cmd.args(build_daemon_args(
+        rpc,
+        &db_path.to_string_lossy(),
+        0,
+        None,
+    ));
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
     cmd.spawn()
@@ -182,6 +212,25 @@ fn poll_for_message(
     }
 }
 
+fn poll_for_peer(
+    rpc: &str,
+    peer_id: &str,
+    timeout: Duration,
+    mut request_id: u64,
+) -> io::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let response = rpc_call(rpc, request_id, "list_peers", None)?;
+        request_id = request_id.wrapping_add(1);
+        if peer_present(&response, peer_id) {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
 fn cleanup_child(child: &mut Child, keep: bool) {
     if keep {
         return;
