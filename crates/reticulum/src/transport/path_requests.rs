@@ -1,8 +1,8 @@
-use alloc::collections::{BTreeSet, BTreeMap};
+use alloc::collections::{BTreeSet, BTreeMap, VecDeque};
 
 use rand_core::OsRng;
 
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 
 use crate::destination::DestinationName;
 use crate::destination::PlainInputDestination;
@@ -82,16 +82,30 @@ pub struct PathRequests {
     transport_id: Option<AddressHash>,
     controlled_destination: PlainInputDestination,
     discovery: BTreeMap<AddressHash, Instant>,
+    announce_queue_len: usize,
+    announce_cap: usize,
+    request_timeout: Duration,
+    queue: VecDeque<(AddressHash, Instant)>,
 }
 
 impl PathRequests {
-    pub fn new(name: &str, transport_id: Option<AddressHash>) -> Self {
+    pub fn new(
+        name: &str,
+        transport_id: Option<AddressHash>,
+        announce_queue_len: usize,
+        announce_cap: usize,
+        request_timeout_secs: u64,
+    ) -> Self {
         Self {
             cache: BTreeSet::new(),
             name: name.into(),
             transport_id,
             controlled_destination: create_path_request_destination(),
             discovery: BTreeMap::new(),
+            announce_queue_len,
+            announce_cap,
+            request_timeout: Duration::from_secs(request_timeout_secs.max(1)),
+            queue: alloc::collections::VecDeque::new(),
         }
     }
 
@@ -155,8 +169,17 @@ impl PathRequests {
     ) -> bool {
         let now = Instant::now();
 
+        self.discovery.retain(|_, timeout| *timeout > now);
+        while let Some((queued_dest, timeout)) = self.queue.front().copied() {
+            if timeout > now {
+                break;
+            }
+            self.queue.pop_front();
+            self.discovery.remove(&queued_dest);
+        }
+
         if let Some(timeout) = self.discovery.get(destination) {
-            if *timeout < now {
+            if *timeout >= now {
                 log::info!(
                     "tp({}): rejecting discovery path request for destination {} as a request is already pending",
                     self.name,
@@ -164,9 +187,30 @@ impl PathRequests {
                 );
                 return false;
             }
+            self.discovery.remove(destination);
         }
 
-        // TODO implement announce queue and announce cap, reject requests based on that
+        if self.announce_cap > 0 && self.discovery.len() >= self.announce_cap {
+            log::info!(
+                "tp({}): rejecting discovery path request for destination {} as announce cap reached",
+                self.name,
+                destination
+            );
+            return false;
+        }
+
+        if self.announce_queue_len > 0 && self.queue.len() >= self.announce_queue_len {
+            log::info!(
+                "tp({}): rejecting discovery path request for destination {} as announce queue is full",
+                self.name,
+                destination
+            );
+            return false;
+        }
+
+        let expiry = now + self.request_timeout;
+        self.discovery.insert(*destination, expiry);
+        self.queue.push_back((*destination, expiry));
 
         true
     }
@@ -197,7 +241,7 @@ mod tests {
 
     #[test]
     fn path_request_roundtrip() {
-        let mut testee = PathRequests::new("", None);
+        let mut testee = PathRequests::new("", None, 16, 16, 30);
 
         let dest = AddressHash::new_from_rand(OsRng);
 

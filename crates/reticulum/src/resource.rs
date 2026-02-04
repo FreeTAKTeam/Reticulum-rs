@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use tokio::time::{Duration, Instant};
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -54,6 +55,25 @@ pub struct ResourceAdvertisement {
 pub struct ResourceEvent {
     pub hash: Hash,
     pub link_id: AddressHash,
+    pub kind: ResourceEventKind,
+}
+
+#[derive(Debug, Clone)]
+pub enum ResourceEventKind {
+    Progress(ResourceProgress),
+    Complete(ResourceComplete),
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceProgress {
+    pub received_bytes: u64,
+    pub total_bytes: u64,
+    pub received_parts: usize,
+    pub total_parts: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceComplete {
     pub data: Vec<u8>,
     pub metadata: Option<Vec<u8>>,
 }
@@ -428,13 +448,20 @@ impl ResourceSender {
 #[derive(Debug, Clone)]
 struct ResourceReceiver {
     resource_hash: Hash,
+    link_id: AddressHash,
     random_hash: [u8; RANDOM_HASH_SIZE],
     parts: Vec<Option<Vec<u8>>>,
     hashmap: Vec<Option<[u8; MAPHASH_LEN]>>,
     received: usize,
+    received_bytes: u64,
+    total_bytes: u64,
     encrypted: bool,
     compressed: bool,
+    split: bool,
     has_metadata: bool,
+    last_progress: Instant,
+    last_request: Instant,
+    retry_count: u8,
     status: ResourceStatus,
 }
 
@@ -451,17 +478,25 @@ enum PartOutcome {
 }
 
 impl ResourceReceiver {
-    fn new(adv: &ResourceAdvertisement) -> Self {
+    fn new(adv: &ResourceAdvertisement, link_id: AddressHash) -> Self {
+        let now = Instant::now();
         let total_parts = adv.parts as usize;
         let mut receiver = Self {
             resource_hash: adv.hash,
+            link_id,
             random_hash: adv.random_hash,
             parts: vec![None; total_parts],
             hashmap: vec![None; total_parts],
             received: 0,
+            received_bytes: 0,
+            total_bytes: adv.transfer_size,
             encrypted: adv.encrypted(),
             compressed: adv.compressed(),
+            split: (adv.flags & FLAG_SPLIT) == FLAG_SPLIT,
             has_metadata: (adv.flags & FLAG_METADATA) == FLAG_METADATA,
+            last_progress: now,
+            last_request: now,
+            retry_count: 0,
             status: ResourceStatus::Advertised,
         };
         receiver.apply_hashmap_segment(adv.segment_index.saturating_sub(1) as usize, &adv.hashmap);
@@ -517,6 +552,11 @@ impl ResourceReceiver {
     }
 
     fn handle_part(&mut self, part: &[u8], link: &Link) -> PartOutcome {
+        if self.compressed || self.split {
+            self.status = ResourceStatus::Failed;
+            return PartOutcome::Incomplete;
+        }
+
         let hash = map_hash(part, &self.random_hash);
         let Some(index) = self
             .hashmap
@@ -529,6 +569,10 @@ impl ResourceReceiver {
         if self.parts[index].is_none() {
             self.parts[index] = Some(part.to_vec());
             self.received += 1;
+            self.received_bytes = self
+                .received_bytes
+                .saturating_add(part.len() as u64);
+            self.last_progress = Instant::now();
         }
 
         if self.received == self.parts.len() && !self.parts.is_empty() {
@@ -565,19 +609,23 @@ impl ResourceReceiver {
                     let size = ((payload[0] as usize) << 16)
                         | ((payload[1] as usize) << 8)
                         | payload[2] as usize;
+                    if size > METADATA_MAX_SIZE {
+                        self.status = ResourceStatus::Failed;
+                        return PartOutcome::Incomplete;
+                    }
                     if payload.len() >= 3 + size {
                         let meta = payload[3..3 + size].to_vec();
                         let data = payload[3 + size..].to_vec();
                         (Some(meta), data)
                     } else {
-                        (None, payload)
+                        (None, payload.clone())
                     }
                 } else {
-                    (None, payload)
+                    (None, payload.clone())
                 };
 
                 let mut hasher = sha2::Sha256::new();
-                hasher.update(&data_payload);
+                hasher.update(&payload);
                 hasher.update(&self.random_hash);
                 let computed = match copy_hash(&hasher.finalize()) {
                     Ok(hash) => Hash::new(hash),
@@ -589,7 +637,7 @@ impl ResourceReceiver {
 
             if computed == self.resource_hash {
                 let mut proof_hasher = sha2::Sha256::new();
-                proof_hasher.update(&data_payload);
+                proof_hasher.update(&payload);
                 proof_hasher.update(self.resource_hash.as_slice());
                 let proof = match copy_hash(&proof_hasher.finalize()) {
                     Ok(hash) => Hash::new(hash),
@@ -622,18 +670,55 @@ impl ResourceReceiver {
 
         PartOutcome::Incomplete
     }
+
+    fn mark_request(&mut self) {
+        self.last_request = Instant::now();
+        self.retry_count = self.retry_count.saturating_add(1);
+    }
+
+    fn retry_due(&self, now: Instant, retry_interval: Duration, max_retries: u8) -> bool {
+        if self.status == ResourceStatus::Complete || self.status == ResourceStatus::Failed {
+            return false;
+        }
+        if self.retry_count >= max_retries {
+            return false;
+        }
+        now.duration_since(self.last_progress) >= retry_interval
+            && now.duration_since(self.last_request) >= retry_interval
+    }
+
+    fn progress(&self) -> ResourceProgress {
+        ResourceProgress {
+            received_bytes: self.received_bytes,
+            total_bytes: self.total_bytes,
+            received_parts: self.received,
+            total_parts: self.parts.len(),
+        }
+    }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ResourceManager {
     outgoing: HashMap<Hash, ResourceSender>,
     incoming: HashMap<Hash, ResourceReceiver>,
     events: Vec<ResourceEvent>,
+    retry_interval: Duration,
+    retry_limit: u8,
 }
 
 impl ResourceManager {
     pub fn new() -> Self {
-        Self::default()
+        Self::new_with_config(Duration::from_secs(2), 5)
+    }
+
+    pub fn new_with_config(retry_interval: Duration, retry_limit: u8) -> Self {
+        Self {
+            outgoing: HashMap::new(),
+            incoming: HashMap::new(),
+            events: Vec::new(),
+            retry_interval,
+            retry_limit,
+        }
     }
 
     pub fn start_send(
@@ -660,6 +745,25 @@ impl ResourceManager {
         std::mem::take(&mut self.events)
     }
 
+    pub fn retry_requests(&mut self, now: Instant) -> Vec<(AddressHash, ResourceRequest)> {
+        let mut requests = Vec::new();
+        let mut failed = Vec::new();
+        for (hash, receiver) in self.incoming.iter_mut() {
+            if receiver.retry_due(now, self.retry_interval, self.retry_limit) {
+                let request = receiver.build_request();
+                receiver.mark_request();
+                requests.push((receiver.link_id, request));
+            }
+            if receiver.retry_count >= self.retry_limit {
+                failed.push(*hash);
+            }
+        }
+        for hash in failed {
+            self.incoming.remove(&hash);
+        }
+        requests
+    }
+
     pub fn handle_packet(&mut self, packet: &Packet, link: &mut Link) -> Vec<Packet> {
         match packet.context {
             PacketContext::ResourceAdvrtisement => self.handle_advertisement(packet, link),
@@ -678,9 +782,18 @@ impl ResourceManager {
         let Ok(advertisement) = ResourceAdvertisement::unpack(packet.data.as_slice()) else {
             return Vec::new();
         };
+        if advertisement.compressed() || (advertisement.flags & FLAG_SPLIT) == FLAG_SPLIT {
+            log::warn!(
+                "resource: rejecting unsupported advertisement flags (compressed={}, split={})",
+                advertisement.compressed(),
+                (advertisement.flags & FLAG_SPLIT) == FLAG_SPLIT
+            );
+            return Vec::new();
+        }
         let resource_hash = advertisement.hash;
-        let receiver = ResourceReceiver::new(&advertisement);
+        let mut receiver = ResourceReceiver::new(&advertisement, *link.id());
         let request = receiver.build_request();
+        receiver.mark_request();
         self.incoming.insert(resource_hash, receiver);
         vec![build_link_packet(
             link,
@@ -724,6 +837,7 @@ impl ResourceManager {
         let mut request_packet: Option<Packet> = None;
         let mut payload: Option<ResourcePayload> = None;
         for (hash, receiver) in self.incoming.iter_mut() {
+            let before_received = receiver.received;
             match receiver.handle_part(packet.data.as_slice(), link) {
                 PartOutcome::NoMatch => continue,
                 PartOutcome::Complete(packet, data_payload) => {
@@ -734,12 +848,20 @@ impl ResourceManager {
                 }
                 PartOutcome::Incomplete => {
                     let request = receiver.build_request();
+                    receiver.mark_request();
                     request_packet = Some(build_link_packet(
                         link,
                         PacketType::Data,
                         PacketContext::ResourceRequest,
                         &request.encode(),
                     ));
+                    if receiver.received > before_received {
+                        self.events.push(ResourceEvent {
+                            hash: *hash,
+                            link_id: receiver.link_id,
+                            kind: ResourceEventKind::Progress(receiver.progress()),
+                        });
+                    }
                     break;
                 }
             }
@@ -750,8 +872,10 @@ impl ResourceManager {
                 self.events.push(ResourceEvent {
                     hash,
                     link_id: *link.id(),
-                    data: payload.data,
-                    metadata: payload.metadata,
+                    kind: ResourceEventKind::Complete(ResourceComplete {
+                        data: payload.data,
+                        metadata: payload.metadata,
+                    }),
                 });
             }
         }
@@ -786,6 +910,12 @@ impl ResourceManager {
     }
 }
 
+impl Default for ResourceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn build_link_packet(
     link: &Link,
     packet_type: PacketType,
@@ -804,6 +934,15 @@ fn build_link_packet(
         context,
         data: PacketDataBuffer::new_from_slice(payload),
     }
+}
+
+pub(crate) fn build_resource_request_packet(link: &Link, request: &ResourceRequest) -> Packet {
+    build_link_packet(
+        link,
+        PacketType::Data,
+        PacketContext::ResourceRequest,
+        &request.encode(),
+    )
 }
 
 fn slice_hashmap_segment(hashes: &[[u8; MAPHASH_LEN]], segment: usize) -> Vec<u8> {
@@ -843,4 +982,71 @@ fn copy_fixed<const N: usize>(bytes: &[u8]) -> Result<[u8; N], RnsError> {
     let mut out = [0u8; N];
     out.copy_from_slice(&bytes[..N]);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::destination::{DestinationDesc, DestinationName};
+    use crate::identity::PrivateIdentity;
+    use rand_core::OsRng;
+
+    #[test]
+    fn resource_sender_rejects_oversized_metadata() {
+        let signer = PrivateIdentity::new_from_rand(OsRng);
+        let identity = signer.as_identity();
+        let destination = DestinationDesc {
+            identity,
+            address_hash: identity.address_hash,
+            name: DestinationName::new("lxmf", "resource"),
+        };
+        let (tx, _) = tokio::sync::broadcast::channel(1);
+        let link = Link::new(destination, tx);
+        let data = vec![0u8; 4];
+        let metadata = vec![0u8; METADATA_MAX_SIZE + 1];
+
+        let result = ResourceSender::new(&link, data, Some(metadata));
+        assert!(matches!(result, Err(RnsError::InvalidArgument)));
+    }
+
+    #[test]
+    fn resource_manager_rejects_split_flag() {
+        let signer = PrivateIdentity::new_from_rand(OsRng);
+        let identity = signer.as_identity();
+        let destination = DestinationDesc {
+            identity,
+            address_hash: identity.address_hash,
+            name: DestinationName::new("lxmf", "resource"),
+        };
+        let (tx, _) = tokio::sync::broadcast::channel(1);
+        let mut link = Link::new(destination, tx);
+        link.request();
+
+        let adv = ResourceAdvertisement {
+            transfer_size: 1,
+            data_size: 1,
+            parts: 1,
+            hash: Hash::new_from_slice(&[1, 2, 3, 4]),
+            random_hash: [0u8; RANDOM_HASH_SIZE],
+            original_hash: Hash::new_from_slice(&[1, 2, 3, 4]),
+            segment_index: 1,
+            total_segments: 1,
+            request_id: None,
+            flags: FLAG_SPLIT,
+            hashmap: vec![0u8; MAPHASH_LEN],
+        };
+
+        let packet = build_link_packet(
+            &link,
+            PacketType::Data,
+            PacketContext::ResourceAdvrtisement,
+            &adv.pack().expect("advertisement"),
+        );
+
+        let mut manager = ResourceManager::new_with_config(Duration::from_secs(1), 1);
+        let responses = manager.handle_packet(&packet, &mut link);
+
+        assert!(responses.is_empty());
+        assert!(manager.incoming.is_empty());
+    }
 }

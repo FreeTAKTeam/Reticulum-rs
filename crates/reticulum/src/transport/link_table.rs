@@ -38,11 +38,19 @@ fn send_backwards(packet: &Packet, entry: &LinkEntry) -> (Packet, AddressHash) {
     (propagated, entry.received_from)
 }
 
-pub struct LinkTable(HashMap<LinkId, LinkEntry>);
+pub struct LinkTable {
+    entries: HashMap<LinkId, LinkEntry>,
+    proof_timeout: Duration,
+    idle_timeout: Duration,
+}
 
 impl LinkTable {
-    pub fn new() -> Self {
-        Self(HashMap::new())
+    pub fn new(proof_timeout: Duration, idle_timeout: Duration) -> Self {
+        Self {
+            entries: HashMap::new(),
+            proof_timeout,
+            idle_timeout,
+        }
     }
 
     pub fn add(
@@ -55,7 +63,7 @@ impl LinkTable {
     ) {
         let link_id = LinkId::from(link_request);
 
-        if self.0.contains_key(&link_id) {
+        if self.entries.contains_key(&link_id) {
             return;
         }
 
@@ -64,7 +72,7 @@ impl LinkTable {
 
         let entry = LinkEntry {
             timestamp: now,
-            proof_timeout: now + Duration::from_secs(600), // TODO
+            proof_timeout: now + self.proof_timeout,
             next_hop,
             next_hop_iface: iface,
             received_from,
@@ -74,22 +82,27 @@ impl LinkTable {
             validated: false
         };
 
-        self.0.insert(link_id, entry);
+        self.entries.insert(link_id, entry);
     }
 
     pub fn original_destination(&self, link_id: &LinkId) -> Option<AddressHash> {
-        self.0.get(link_id).filter(|e| e.validated).map(|e| e.original_destination)
+        self.entries.get(link_id).filter(|e| e.validated).map(|e| e.original_destination)
     }
 
-    pub fn handle_keepalive(&self, packet: &Packet) -> Option<(Packet, AddressHash)> {
-        self.0.get(&packet.destination).map(|entry| send_backwards(packet, entry))
+    pub fn handle_keepalive(&mut self, packet: &Packet) -> Option<(Packet, AddressHash)> {
+        if let Some(entry) = self.entries.get_mut(&packet.destination) {
+            entry.timestamp = Instant::now();
+            return Some(send_backwards(packet, entry));
+        }
+        None
     }
 
     pub fn handle_proof(&mut self, proof: &Packet) -> Option<(Packet, AddressHash)> {
-        match self.0.get_mut(&proof.destination) {
+        match self.entries.get_mut(&proof.destination) {
             Some(entry) => {
                 entry.remaining_hops = proof.header.hops;
                 entry.validated = true;
+                entry.timestamp = Instant::now();
 
                 Some(send_backwards(proof, entry))
             },
@@ -101,16 +114,18 @@ impl LinkTable {
         let mut stale = vec![];
         let now = Instant::now();
 
-        for (link_id, entry) in &self.0 {
+        for (link_id, entry) in &self.entries {
             if entry.validated {
-                // TODO remove active timed out links
+                if entry.timestamp + self.idle_timeout <= now {
+                    stale.push(*link_id);
+                }
             } else if entry.proof_timeout <= now {
                 stale.push(*link_id);
             }
         }
 
         for link_id in stale {
-            self.0.remove(&link_id);
+            self.entries.remove(&link_id);
         }
     }
 }

@@ -154,14 +154,16 @@ pub struct AnnounceTable {
     map: BTreeMap<AddressHash, AnnounceEntry>,
     responses: BTreeMap<AddressHash, AnnounceEntry>,
     cache: AnnounceCache,
+    retry_limit: u8,
 }
 
 impl AnnounceTable {
-    pub fn new() -> Self {
+    pub fn new(cache_capacity: usize, retry_limit: u8) -> Self {
         Self {
             map: BTreeMap::new(),
             responses: BTreeMap::new(),
-            cache: AnnounceCache::new(100000), // TODO make capacity configurable
+            cache: AnnounceCache::new(cache_capacity),
+            retry_limit,
         }
     }
 
@@ -187,7 +189,7 @@ impl AnnounceTable {
             timestamp: now,
             timeout: now + Duration::from_secs(60),
             received_from,
-            retries: 5, // TODO: make this configurable too?
+            retries: self.retry_limit,
             hops,
             response_to_iface: None,
         };
@@ -298,6 +300,6 @@ impl AnnounceTable {
 
 impl Default for AnnounceTable {
     fn default() -> Self {
-        Self::new()
+        Self::new(100_000, 5)
     }
 }

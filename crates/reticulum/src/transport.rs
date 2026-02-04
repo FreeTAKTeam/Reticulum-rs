@@ -11,6 +11,7 @@ use rand_core::OsRng;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use tokio::sync::broadcast;
@@ -45,7 +46,7 @@ use crate::packet::Packet;
 use crate::packet::PacketContext;
 use crate::packet::PacketDataBuffer;
 use crate::packet::PacketType;
-use crate::resource::{ResourceEvent, ResourceManager};
+use crate::resource::{build_resource_request_packet, ResourceEvent, ResourceManager};
 
 mod announce_limits;
 pub mod announce_table;
@@ -127,6 +128,15 @@ pub struct TransportConfig {
     identity: PrivateIdentity,
     broadcast: bool,
     retransmit: bool,
+    announce_cache_capacity: usize,
+    announce_retry_limit: u8,
+    announce_queue_len: usize,
+    announce_cap: usize,
+    path_request_timeout_secs: u64,
+    link_proof_timeout_secs: u64,
+    link_idle_timeout_secs: u64,
+    resource_retry_interval_secs: u64,
+    resource_retry_limit: u8,
 }
 
 pub struct DeliveryReceipt {
@@ -201,6 +211,15 @@ impl TransportConfig {
             identity: identity.clone(),
             broadcast,
             retransmit: false,
+            announce_cache_capacity: 100_000,
+            announce_retry_limit: 5,
+            announce_queue_len: 64,
+            announce_cap: 128,
+            path_request_timeout_secs: 30,
+            link_proof_timeout_secs: 600,
+            link_idle_timeout_secs: 900,
+            resource_retry_interval_secs: 2,
+            resource_retry_limit: 5,
         }
     }
 
@@ -209,6 +228,42 @@ impl TransportConfig {
     }
     pub fn set_broadcast(&mut self, broadcast: bool) {
         self.broadcast = broadcast;
+    }
+
+    pub fn set_announce_cache_capacity(&mut self, capacity: usize) {
+        self.announce_cache_capacity = capacity;
+    }
+
+    pub fn set_announce_retry_limit(&mut self, limit: u8) {
+        self.announce_retry_limit = limit;
+    }
+
+    pub fn set_announce_queue_len(&mut self, len: usize) {
+        self.announce_queue_len = len;
+    }
+
+    pub fn set_announce_cap(&mut self, cap: usize) {
+        self.announce_cap = cap;
+    }
+
+    pub fn set_path_request_timeout_secs(&mut self, secs: u64) {
+        self.path_request_timeout_secs = secs;
+    }
+
+    pub fn set_link_proof_timeout_secs(&mut self, secs: u64) {
+        self.link_proof_timeout_secs = secs;
+    }
+
+    pub fn set_link_idle_timeout_secs(&mut self, secs: u64) {
+        self.link_idle_timeout_secs = secs;
+    }
+
+    pub fn set_resource_retry_interval_secs(&mut self, secs: u64) {
+        self.resource_retry_interval_secs = secs;
+    }
+
+    pub fn set_resource_retry_limit(&mut self, limit: u8) {
+        self.resource_retry_limit = limit;
     }
 }
 
@@ -219,6 +274,15 @@ impl Default for TransportConfig {
             identity: PrivateIdentity::new_from_rand(OsRng),
             broadcast: false,
             retransmit: false,
+            announce_cache_capacity: 100_000,
+            announce_retry_limit: 5,
+            announce_queue_len: 64,
+            announce_cap: 128,
+            path_request_timeout_secs: 30,
+            link_proof_timeout_secs: 600,
+            link_idle_timeout_secs: 900,
+            resource_retry_interval_secs: 2,
+            resource_retry_limit: 5,
         }
     }
 }
@@ -238,12 +302,28 @@ impl Transport {
 
         let iface_manager = Arc::new(Mutex::new(iface_manager));
 
+        let announce_cache_capacity = config.announce_cache_capacity;
+        let announce_retry_limit = config.announce_retry_limit;
+        let announce_queue_len = config.announce_queue_len;
+        let announce_cap = config.announce_cap;
+        let path_request_timeout_secs = config.path_request_timeout_secs;
+        let link_proof_timeout_secs = config.link_proof_timeout_secs;
+        let link_idle_timeout_secs = config.link_idle_timeout_secs;
+        let resource_retry_interval_secs = config.resource_retry_interval_secs;
+        let resource_retry_limit = config.resource_retry_limit;
+
         let transport_id = if config.retransmit {
             Some(*config.identity.address_hash())
         } else {
             None
         };
-        let path_requests = PathRequests::new(config.name.as_str(), transport_id);
+        let path_requests = PathRequests::new(
+            config.name.as_str(),
+            transport_id,
+            announce_queue_len,
+            announce_cap,
+            path_request_timeout_secs,
+        );
 
         let path_request_dest = create_path_request_destination().desc.address_hash;
 
@@ -252,8 +332,11 @@ impl Transport {
         let handler = Arc::new(Mutex::new(TransportHandler {
             config,
             iface_manager: iface_manager.clone(),
-            announce_table: AnnounceTable::new(),
-            link_table: LinkTable::new(),
+            announce_table: AnnounceTable::new(announce_cache_capacity, announce_retry_limit),
+            link_table: LinkTable::new(
+                Duration::from_secs(link_proof_timeout_secs),
+                Duration::from_secs(link_idle_timeout_secs),
+            ),
             path_table: PathTable::new(),
             single_in_destinations: HashMap::new(),
             single_out_destinations: HashMap::new(),
@@ -265,7 +348,10 @@ impl Transport {
             announce_tx,
             link_in_event_tx: link_in_event_tx.clone(),
             received_data_tx: received_data_tx.clone(),
-            resource_manager: ResourceManager::new(),
+            resource_manager: ResourceManager::new_with_config(
+                Duration::from_secs(resource_retry_interval_secs),
+                resource_retry_limit,
+            ),
             resource_events_tx: resource_events_tx.clone(),
             fixed_dest_path_requests: path_request_dest,
             cancel: cancel.clone(),
@@ -326,8 +412,23 @@ impl Transport {
             self.send_direct(iface, packet).await;
             log::trace!("Sent outbound packet to {}", iface);
         }
-
-        // TODO handle other cases
+        if maybe_iface.is_none() {
+            let handler = self.handler.lock().await;
+            if handler.config.broadcast {
+                handler
+                    .send(TxMessage {
+                        tx_type: TxMessageType::Broadcast(None),
+                        packet,
+                    })
+                    .await;
+            } else {
+                log::trace!(
+                    "tp({}): no route for outbound packet dst={}",
+                    self.name,
+                    packet.destination
+                );
+            }
+        }
     }
 
     pub fn iface_manager(&self) -> Arc<Mutex<InterfaceManager>> {
@@ -800,7 +901,7 @@ async fn send_to_next_hop<'a>(
 
 async fn handle_keepalive_response<'a>(
     packet: &Packet,
-    handler: &MutexGuard<'a, TransportHandler>
+    handler: &mut MutexGuard<'a, TransportHandler>
 ) -> bool {
     if packet.context == PacketContext::KeepAlive
         && packet.data.as_slice()[0] == KEEP_ALIVE_RESPONSE
@@ -882,7 +983,7 @@ async fn handle_data<'a>(packet: &Packet, mut handler: MutexGuard<'a, TransportH
             data_handled = true;
         }
 
-        if handle_keepalive_response(packet, &handler).await {
+        if handle_keepalive_response(packet, &mut handler).await {
             return;
         }
 
@@ -1346,10 +1447,13 @@ async fn manage_transport(
                             continue;
                         }
 
-                        if handler.config.broadcast && packet.header.packet_type != PacketType::Announce {
-                            // TODO: remove seperate handling for announces in handle_announce.
-                            // Send broadcast message expect current iface address
-                            handler.send(TxMessage { tx_type: TxMessageType::Broadcast(Some(message.address)), packet }).await;
+                        if handler.config.broadcast {
+                            handler
+                                .send(TxMessage {
+                                    tx_type: TxMessageType::Broadcast(Some(message.address)),
+                                    packet,
+                                })
+                                .await;
                         }
 
                         match packet.header.packet_type {
@@ -1487,6 +1591,51 @@ async fn manage_transport(
                     },
                     _ = time::sleep(INTERVAL_ANNOUNCES_RETRANSMIT) => {
                         retransmit_announces(handler.lock().await).await;
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+        let retry_interval = Duration::from_secs(
+            handler_arc
+                .lock()
+                .await
+                .config
+                .resource_retry_interval_secs
+                .max(1),
+        );
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(retry_interval) => {
+                        let mut handler = handler.lock().await;
+                        let now = Instant::now();
+                        let requests = handler.resource_manager.retry_requests(now);
+                        for (link_id, request) in requests {
+                            let link = handler
+                                .in_links
+                                .get(&link_id)
+                                .cloned()
+                                .or_else(|| handler.out_links.get(&link_id).cloned());
+                            if let Some(link) = link {
+                                let link_guard = link.lock().await;
+                                let packet = build_resource_request_packet(&link_guard, &request);
+                                drop(link_guard);
+                                handler.send_packet(packet).await;
+                            }
+                        }
                     }
                 }
             }
