@@ -6,7 +6,7 @@ use serde_json::{json, Value as JsonValue};
 
 use crate::storage::messages::{MessageRecord, MessagesStore};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::Duration;
 
@@ -36,6 +36,16 @@ pub struct RpcDaemon {
     events: broadcast::Sender<RpcEvent>,
     event_queue: Mutex<VecDeque<RpcEvent>>,
     peers: Mutex<HashMap<String, PeerRecord>>,
+    outbound_bridge: Option<Arc<dyn OutboundBridge>>,
+    announce_bridge: Option<Arc<dyn AnnounceBridge>>,
+}
+
+pub trait OutboundBridge: Send + Sync {
+    fn deliver(&self, record: &MessageRecord) -> Result<(), std::io::Error>;
+}
+
+pub trait AnnounceBridge: Send + Sync {
+    fn announce_now(&self) -> Result<(), std::io::Error>;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -55,6 +65,8 @@ struct SendMessageParams {
     id: String,
     source: String,
     destination: String,
+    #[serde(default)]
+    title: String,
     content: String,
     fields: Option<JsonValue>,
 }
@@ -80,6 +92,43 @@ impl RpcDaemon {
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
+            outbound_bridge: None,
+            announce_bridge: None,
+        }
+    }
+
+    pub fn with_store_and_bridge(
+        store: MessagesStore,
+        identity_hash: String,
+        outbound_bridge: Arc<dyn OutboundBridge>,
+    ) -> Self {
+        let (events, _rx) = broadcast::channel(64);
+        Self {
+            store,
+            identity_hash,
+            events,
+            event_queue: Mutex::new(VecDeque::new()),
+            peers: Mutex::new(HashMap::new()),
+            outbound_bridge: Some(outbound_bridge),
+            announce_bridge: None,
+        }
+    }
+
+    pub fn with_store_and_bridges(
+        store: MessagesStore,
+        identity_hash: String,
+        outbound_bridge: Option<Arc<dyn OutboundBridge>>,
+        announce_bridge: Option<Arc<dyn AnnounceBridge>>,
+    ) -> Self {
+        let (events, _rx) = broadcast::channel(64);
+        Self {
+            store,
+            identity_hash,
+            events,
+            event_queue: Mutex::new(VecDeque::new()),
+            peers: Mutex::new(HashMap::new()),
+            outbound_bridge,
+            announce_bridge,
         }
     }
 
@@ -101,6 +150,25 @@ impl RpcDaemon {
         let event = RpcEvent {
             event_type: "inbound".into(),
             payload: json!({ "message": record }),
+        };
+        self.push_event(event.clone());
+        let _ = self.events.send(event);
+        Ok(())
+    }
+
+    pub fn accept_inbound(&self, record: MessageRecord) -> Result<(), std::io::Error> {
+        self.store_inbound_record(record)
+    }
+
+    pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
+        let record = PeerRecord { peer, last_seen: timestamp };
+        {
+            let mut guard = self.peers.lock().expect("peers mutex poisoned");
+            guard.insert(record.peer.clone(), record.clone());
+        }
+        let event = RpcEvent {
+            event_type: "announce_received".into(),
+            payload: json!({ "peer": record.peer, "timestamp": record.last_seen }),
         };
         self.push_event(event.clone());
         let _ = self.events.send(event);
@@ -164,6 +232,7 @@ impl RpcDaemon {
                     id: parsed.id.clone(),
                     source: parsed.source,
                     destination: parsed.destination,
+                    title: parsed.title,
                     content: parsed.content,
                     timestamp,
                     direction: "out".into(),
@@ -173,7 +242,11 @@ impl RpcDaemon {
                 self.store
                     .insert_message(&record)
                     .map_err(std::io::Error::other)?;
-                let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
+                if let Some(bridge) = &self.outbound_bridge {
+                    let _ = bridge.deliver(&record);
+                } else {
+                    let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
+                }
                 let event = RpcEvent {
                     event_type: "outbound".into(),
                     payload: json!({ "message": record }),
@@ -200,6 +273,7 @@ impl RpcDaemon {
                     id: parsed.id.clone(),
                     source: parsed.source,
                     destination: parsed.destination,
+                    title: parsed.title,
                     content: parsed.content,
                     timestamp,
                     direction: "in".into(),
@@ -239,6 +313,9 @@ impl RpcDaemon {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|value| value.as_secs() as i64)
                     .unwrap_or(0);
+                if let Some(bridge) = &self.announce_bridge {
+                    let _ = bridge.announce_now();
+                }
                 let event = RpcEvent {
                     event_type: "announce_sent".into(),
                     payload: json!({ "timestamp": timestamp }),
@@ -280,6 +357,46 @@ impl RpcDaemon {
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "peer": record })),
+                    error: None,
+                })
+            }
+            "clear_messages" => {
+                self.store
+                    .clear_messages()
+                    .map_err(std::io::Error::other)?;
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "cleared": "messages" })),
+                    error: None,
+                })
+            }
+            "clear_resources" => Ok(RpcResponse {
+                id: request.id,
+                result: Some(json!({ "cleared": "resources" })),
+                error: None,
+            }),
+            "clear_peers" => {
+                {
+                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
+                    guard.clear();
+                }
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "cleared": "peers" })),
+                    error: None,
+                })
+            }
+            "clear_all" => {
+                self.store
+                    .clear_messages()
+                    .map_err(std::io::Error::other)?;
+                {
+                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
+                    guard.clear();
+                }
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "cleared": "all" })),
                     error: None,
                 })
             }
@@ -362,6 +479,7 @@ impl RpcDaemon {
             id: format!("test-{}", timestamp),
             source: "test-peer".into(),
             destination: "local".into(),
+            title: "".into(),
             content: content.into(),
             timestamp,
             direction: "in".into(),

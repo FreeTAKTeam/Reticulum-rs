@@ -30,8 +30,9 @@ use crate::destination::DestinationName;
 use crate::destination::SingleInputDestination;
 use crate::destination::SingleOutputDestination;
 
-use crate::hash::{AddressHash, HASH_SIZE};
+use crate::hash::{AddressHash, Hash, HASH_SIZE};
 use crate::identity::PrivateIdentity;
+use crate::error::RnsError;
 
 use crate::iface::InterfaceManager;
 use crate::iface::InterfaceRxReceiver;
@@ -44,6 +45,7 @@ use crate::packet::Packet;
 use crate::packet::PacketContext;
 use crate::packet::PacketDataBuffer;
 use crate::packet::PacketType;
+use crate::resource::ResourceManager;
 
 mod announce_limits;
 pub mod announce_table;
@@ -171,6 +173,8 @@ pub(crate) struct TransportHandler {
     link_in_event_tx: broadcast::Sender<LinkEventData>,
     received_data_tx: broadcast::Sender<ReceivedData>,
 
+    resource_manager: ResourceManager,
+
     fixed_dest_path_requests: AddressHash,
 
     cancel: CancellationToken,
@@ -258,6 +262,7 @@ impl Transport {
             announce_tx,
             link_in_event_tx: link_in_event_tx.clone(),
             received_data_tx: received_data_tx.clone(),
+            resource_manager: ResourceManager::new(),
             fixed_dest_path_requests: path_request_dest,
             cancel: cancel.clone(),
             receipt_handler: None,
@@ -467,6 +472,29 @@ impl Transport {
                 destination
             );
         }
+    }
+
+    pub async fn send_resource(
+        &self,
+        link_id: &AddressHash,
+        data: Vec<u8>,
+    ) -> Result<Hash, RnsError> {
+        let link = {
+            let handler = self.handler.lock().await;
+            handler
+                .out_links
+                .get(link_id)
+                .cloned()
+                .or_else(|| handler.in_links.get(link_id).cloned())
+        };
+
+        let link = link.ok_or(RnsError::InvalidArgument)?;
+        let mut handler = self.handler.lock().await;
+        let link_guard = link.lock().await;
+        let (resource_hash, packet) = handler.resource_manager.start_send(&link_guard, data)?;
+        drop(link_guard);
+        handler.send_packet(packet).await;
+        Ok(resource_hash)
     }
 
     pub async fn find_out_link(&self, link_id: &AddressHash) -> Option<Arc<Mutex<Link>>> {
@@ -782,10 +810,37 @@ async fn handle_keepalive_response<'a>(
     false
 }
 
-async fn handle_data<'a>(packet: &Packet, handler: MutexGuard<'a, TransportHandler>) {
+async fn handle_data<'a>(packet: &Packet, mut handler: MutexGuard<'a, TransportHandler>) {
     let mut data_handled = false;
 
     if packet.header.destination_type == DestinationType::Link {
+        if matches!(
+            packet.context,
+            PacketContext::Resource
+                | PacketContext::ResourceAdvrtisement
+                | PacketContext::ResourceRequest
+                | PacketContext::ResourceHashUpdate
+                | PacketContext::ResourceProof
+                | PacketContext::ResourceInitiatorCancel
+                | PacketContext::ResourceReceiverCancel
+        ) {
+            let link = handler
+                .in_links
+                .get(&packet.destination)
+                .cloned()
+                .or_else(|| handler.out_links.get(&packet.destination).cloned());
+
+            if let Some(link) = link {
+                let mut link = link.lock().await;
+                let responses = handler.resource_manager.handle_packet(packet, &mut link);
+                drop(link);
+                for response in responses {
+                    handler.send_packet(response).await;
+                }
+                return;
+            }
+        }
+
         eprintln!(
             "[tp] link_data dst={} ctx={:02x} len={}",
             packet.destination,
