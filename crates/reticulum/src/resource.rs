@@ -1,13 +1,17 @@
 use std::collections::HashMap;
+use std::io::Read;
 use tokio::time::{Duration, Instant};
 
+use bzip2::read::BzDecoder;
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use sha2::Digest;
 
 use crate::destination::link::Link;
 use crate::error::RnsError;
-use crate::hash::{AddressHash, Hash, HASH_SIZE};
+use crate::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+use crate::hash::{AddressHash, Hash, HASH_SIZE, ADDRESS_HASH_SIZE};
 use crate::packet::{Header, Packet, PacketContext, PacketDataBuffer, PacketType, PACKET_MDU};
 use crate::packet::DestinationType;
 
@@ -15,7 +19,16 @@ pub const WINDOW: usize = 4;
 pub const MAPHASH_LEN: usize = 4;
 pub const RANDOM_HASH_SIZE: usize = 4;
 pub const ADVERTISEMENT_OVERHEAD: usize = 134;
-pub const HASHMAP_MAX_LEN: usize = (PACKET_MDU.saturating_sub(ADVERTISEMENT_OVERHEAD)) / MAPHASH_LEN;
+const HEADER_MINSIZE: usize = 2 + 1 + ADDRESS_HASH_SIZE;
+const HEADER_MAXSIZE: usize = 2 + 1 + (ADDRESS_HASH_SIZE * 2);
+const IFAC_MIN_SIZE: usize = 1;
+const RETICULUM_MTU: usize = PACKET_MDU + HEADER_MAXSIZE + IFAC_MIN_SIZE;
+pub const LINK_PACKET_MDU: usize = ((RETICULUM_MTU - IFAC_MIN_SIZE - HEADER_MINSIZE - FERNET_OVERHEAD_SIZE)
+    / FERNET_MAX_PADDING_SIZE)
+    * FERNET_MAX_PADDING_SIZE
+    - 1;
+pub const HASHMAP_MAX_LEN: usize =
+    (LINK_PACKET_MDU.saturating_sub(ADVERTISEMENT_OVERHEAD)) / MAPHASH_LEN;
 
 const FLAG_ENCRYPTED: u8 = 0x01;
 const FLAG_COMPRESSED: u8 = 0x02;
@@ -46,7 +59,7 @@ pub struct ResourceAdvertisement {
     pub original_hash: Hash,
     pub segment_index: u32,
     pub total_segments: u32,
-    pub request_id: Option<u64>,
+    pub request_id: Option<ByteBuf>,
     pub flags: u8,
     pub hashmap: Vec<u8>,
 }
@@ -62,6 +75,7 @@ pub struct ResourceEvent {
 pub enum ResourceEventKind {
     Progress(ResourceProgress),
     Complete(ResourceComplete),
+    OutboundComplete,
 }
 
 #[derive(Debug, Clone)]
@@ -97,7 +111,7 @@ struct ResourceAdvertisementFrame {
     #[serde(rename = "l")]
     total_segments: u32,
     #[serde(rename = "q")]
-    request_id: Option<u64>,
+    request_id: Option<ByteBuf>,
     #[serde(rename = "f")]
     flags: u8,
     #[serde(rename = "m", with = "serde_bytes")]
@@ -115,11 +129,11 @@ impl ResourceAdvertisement {
             original_hash: self.original_hash.as_slice().to_vec(),
             segment_index: self.segment_index,
             total_segments: self.total_segments,
-            request_id: self.request_id,
+            request_id: self.request_id.clone(),
             flags: self.flags,
             hashmap: self.hashmap.clone(),
         };
-        rmp_serde::to_vec(&frame).map_err(|_| RnsError::PacketError)
+        rmp_serde::to_vec_named(&frame).map_err(|_| RnsError::PacketError)
     }
 
     pub fn unpack(data: &[u8]) -> Result<Self, RnsError> {
@@ -393,12 +407,16 @@ impl ResourceSender {
         for hash in &request.requested_hashes {
             if let Some(index) = self.map_hashes.iter().position(|entry| entry == hash) {
                 if let Some(part) = self.parts.get(index) {
-                    packets.push(build_link_packet(
+                    if let Ok(packet) = build_link_packet(
                         link,
                         PacketType::Data,
                         PacketContext::Resource,
                         part,
-                    ));
+                    ) {
+                        packets.push(packet);
+                    } else {
+                        log::warn!("resource: failed to build resource packet");
+                    }
                 }
             }
         }
@@ -414,12 +432,16 @@ impl ResourceSender {
                             hashmap: slice_hashmap_segment(&self.map_hashes, next_segment),
                         };
                         if let Ok(payload) = update.encode() {
-                            packets.push(build_link_packet(
+                            if let Ok(packet) = build_link_packet(
                                 link,
                                 PacketType::Data,
                                 PacketContext::ResourceHashUpdate,
                                 &payload,
-                            ));
+                            ) {
+                                packets.push(packet);
+                            } else {
+                                log::warn!("resource: failed to build hash update packet");
+                            }
                         }
                     }
                 }
@@ -552,7 +574,7 @@ impl ResourceReceiver {
     }
 
     fn handle_part(&mut self, part: &[u8], link: &Link) -> PartOutcome {
-        if self.compressed || self.split {
+        if self.split {
             self.status = ResourceStatus::Failed;
             return PartOutcome::Incomplete;
         }
@@ -599,11 +621,21 @@ impl ResourceReceiver {
                 stream
             };
 
-                let payload = if plain.len() > RANDOM_HASH_SIZE {
-                    plain[RANDOM_HASH_SIZE..].to_vec()
-                } else {
-                    Vec::new()
-                };
+            let mut payload = if plain.len() > RANDOM_HASH_SIZE {
+                plain[RANDOM_HASH_SIZE..].to_vec()
+            } else {
+                Vec::new()
+            };
+
+            if self.compressed {
+                let mut decoder = BzDecoder::new(payload.as_slice());
+                let mut decompressed = Vec::new();
+                if decoder.read_to_end(&mut decompressed).is_err() {
+                    self.status = ResourceStatus::Failed;
+                    return PartOutcome::Incomplete;
+                }
+                payload = decompressed;
+            }
 
                 let (metadata, data_payload) = if self.has_metadata && payload.len() >= 3 {
                     let size = ((payload[0] as usize) << 16)
@@ -651,13 +683,21 @@ impl ResourceReceiver {
                     proof,
                 };
                 self.status = ResourceStatus::Complete;
+                let packet = match build_link_packet(
+                    link,
+                    PacketType::Proof,
+                    PacketContext::ResourceProof,
+                    &proof_payload.encode(),
+                ) {
+                    Ok(packet) => packet,
+                    Err(_) => {
+                        log::warn!("resource: failed to build proof packet");
+                        self.status = ResourceStatus::Failed;
+                        return PartOutcome::Incomplete;
+                    }
+                };
                 return PartOutcome::Complete(
-                    build_link_packet(
-                        link,
-                        PacketType::Proof,
-                        PacketContext::ResourceProof,
-                        &proof_payload.encode(),
-                    ),
+                    packet,
                     ResourcePayload {
                         data: data_payload,
                         metadata,
@@ -736,7 +776,7 @@ impl ResourceManager {
             PacketType::Data,
             PacketContext::ResourceAdvrtisement,
             &payload,
-        );
+        )?;
         self.outgoing.insert(resource_hash, sender);
         Ok((resource_hash, packet))
     }
@@ -782,10 +822,9 @@ impl ResourceManager {
         let Ok(advertisement) = ResourceAdvertisement::unpack(packet.data.as_slice()) else {
             return Vec::new();
         };
-        if advertisement.compressed() || (advertisement.flags & FLAG_SPLIT) == FLAG_SPLIT {
+        if (advertisement.flags & FLAG_SPLIT) == FLAG_SPLIT {
             log::warn!(
-                "resource: rejecting unsupported advertisement flags (compressed={}, split={})",
-                advertisement.compressed(),
+                "resource: rejecting unsupported advertisement flags (split={})",
                 (advertisement.flags & FLAG_SPLIT) == FLAG_SPLIT
             );
             return Vec::new();
@@ -795,12 +834,18 @@ impl ResourceManager {
         let request = receiver.build_request();
         receiver.mark_request();
         self.incoming.insert(resource_hash, receiver);
-        vec![build_link_packet(
+        match build_link_packet(
             link,
             PacketType::Data,
             PacketContext::ResourceRequest,
             &request.encode(),
-        )]
+        ) {
+            Ok(packet) => vec![packet],
+            Err(_) => {
+                log::warn!("resource: failed to build request packet");
+                Vec::new()
+            }
+        }
     }
 
     fn handle_request(&mut self, packet: &Packet, link: &mut Link) -> Vec<Packet> {
@@ -821,12 +866,18 @@ impl ResourceManager {
         if let Some(receiver) = self.incoming.get_mut(&update.resource_hash) {
             receiver.handle_hash_update(&update);
             let request = receiver.build_request();
-            return vec![build_link_packet(
+            return match build_link_packet(
                 link,
                 PacketType::Data,
                 PacketContext::ResourceRequest,
                 &request.encode(),
-            )];
+            ) {
+                Ok(packet) => vec![packet],
+                Err(_) => {
+                    log::warn!("resource: failed to build request packet");
+                    Vec::new()
+                }
+            };
         }
         Vec::new()
     }
@@ -849,12 +900,18 @@ impl ResourceManager {
                 PartOutcome::Incomplete => {
                     let request = receiver.build_request();
                     receiver.mark_request();
-                    request_packet = Some(build_link_packet(
+                    request_packet = match build_link_packet(
                         link,
                         PacketType::Data,
                         PacketContext::ResourceRequest,
                         &request.encode(),
-                    ));
+                    ) {
+                        Ok(packet) => Some(packet),
+                        Err(_) => {
+                            log::warn!("resource: failed to build request packet");
+                            None
+                        }
+                    };
                     if receiver.received > before_received {
                         self.events.push(ResourceEvent {
                             hash: *hash,
@@ -895,6 +952,11 @@ impl ResourceManager {
         if let Some(sender) = self.outgoing.get_mut(&proof.resource_hash) {
             if sender.handle_proof(&proof) {
                 self.outgoing.remove(&proof.resource_hash);
+                self.events.push(ResourceEvent {
+                    hash: proof.resource_hash,
+                    link_id: packet.destination,
+                    kind: ResourceEventKind::OutboundComplete,
+                });
             }
         }
         Vec::new()
@@ -921,8 +983,20 @@ fn build_link_packet(
     packet_type: PacketType,
     context: PacketContext,
     payload: &[u8],
-) -> Packet {
-    Packet {
+) -> Result<Packet, RnsError> {
+    let mut packet_data = PacketDataBuffer::new();
+    let should_encrypt =
+        context != PacketContext::Resource && !(packet_type == PacketType::Proof && context == PacketContext::ResourceProof);
+    if should_encrypt {
+        let cipher_text_len = {
+            let cipher_text = link.encrypt(payload, packet_data.accuire_buf_max())?;
+            cipher_text.len()
+        };
+        packet_data.resize(cipher_text_len);
+    } else {
+        packet_data.write(payload)?;
+    }
+    Ok(Packet {
         header: Header {
             destination_type: DestinationType::Link,
             packet_type,
@@ -932,8 +1006,8 @@ fn build_link_packet(
         destination: *link.id(),
         transport: None,
         context,
-        data: PacketDataBuffer::new_from_slice(payload),
-    }
+        data: packet_data,
+    })
 }
 
 pub(crate) fn build_resource_request_packet(link: &Link, request: &ResourceRequest) -> Packet {
@@ -943,6 +1017,7 @@ pub(crate) fn build_resource_request_packet(link: &Link, request: &ResourceReque
         PacketContext::ResourceRequest,
         &request.encode(),
     )
+    .expect("resource request packet")
 }
 
 fn slice_hashmap_segment(hashes: &[[u8; MAPHASH_LEN]], segment: usize) -> Vec<u8> {
@@ -994,7 +1069,7 @@ mod tests {
     #[test]
     fn resource_sender_rejects_oversized_metadata() {
         let signer = PrivateIdentity::new_from_rand(OsRng);
-        let identity = signer.as_identity();
+        let identity = *signer.as_identity();
         let destination = DestinationDesc {
             identity,
             address_hash: identity.address_hash,
@@ -1012,7 +1087,7 @@ mod tests {
     #[test]
     fn resource_manager_rejects_split_flag() {
         let signer = PrivateIdentity::new_from_rand(OsRng);
-        let identity = signer.as_identity();
+        let identity = *signer.as_identity();
         let destination = DestinationDesc {
             identity,
             address_hash: identity.address_hash,
@@ -1041,7 +1116,8 @@ mod tests {
             PacketType::Data,
             PacketContext::ResourceAdvrtisement,
             &adv.pack().expect("advertisement"),
-        );
+        )
+        .expect("resource advertisement packet");
 
         let mut manager = ResourceManager::new_with_config(Duration::from_secs(1), 1);
         let responses = manager.handle_packet(&packet, &mut link);

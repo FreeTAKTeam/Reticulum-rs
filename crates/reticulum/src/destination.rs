@@ -6,6 +6,7 @@ use rand_core::{CryptoRngCore, OsRng};
 use x25519_dalek::PublicKey;
 
 use core::{fmt, marker::PhantomData};
+use std::path::{Path, PathBuf};
 
 use crate::{
     crypt::fernet::{Fernet, PlainText, Token},
@@ -16,8 +17,12 @@ use crate::{
         self, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
         PacketDataBuffer, PacketType, PropagationType,
     },
+    ratchets::{decrypt_with_private_key, now_secs},
 };
 use sha2::Digest;
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
+use x25519_dalek::StaticSecret;
 
 //***************************************************************************//
 
@@ -78,6 +83,135 @@ pub const RAND_HASH_LENGTH: usize = 10;
 pub const RATCHET_LENGTH: usize = PUBLIC_KEY_LENGTH;
 pub const MIN_ANNOUNCE_DATA_LENGTH: usize =
     PUBLIC_KEY_LENGTH * 2 + NAME_HASH_LENGTH + RAND_HASH_LENGTH + SIGNATURE_LENGTH;
+const DEFAULT_RATCHET_INTERVAL_SECS: u64 = 30 * 60;
+const DEFAULT_RETAINED_RATCHETS: usize = 512;
+
+#[derive(Clone)]
+struct RatchetState {
+    enabled: bool,
+    ratchets: Vec<[u8; RATCHET_LENGTH]>,
+    ratchets_path: Option<PathBuf>,
+    ratchet_interval_secs: u64,
+    retained_ratchets: usize,
+    latest_ratchet_time: Option<f64>,
+    enforce_ratchets: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PersistedRatchets {
+    signature: ByteBuf,
+    ratchets: ByteBuf,
+}
+
+impl Default for RatchetState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ratchets: Vec::new(),
+            ratchets_path: None,
+            ratchet_interval_secs: DEFAULT_RATCHET_INTERVAL_SECS,
+            retained_ratchets: DEFAULT_RETAINED_RATCHETS,
+            latest_ratchet_time: None,
+            enforce_ratchets: false,
+        }
+    }
+}
+
+impl RatchetState {
+    fn enable(&mut self, identity: &PrivateIdentity, path: PathBuf) -> Result<(), RnsError> {
+        self.latest_ratchet_time = Some(0.0);
+        self.reload(identity, &path)?;
+        self.enabled = true;
+        self.ratchets_path = Some(path);
+        Ok(())
+    }
+
+    fn reload(&mut self, identity: &PrivateIdentity, path: &Path) -> Result<(), RnsError> {
+        if path.exists() {
+            let data = std::fs::read(path).map_err(|_| RnsError::PacketError)?;
+            let persisted: PersistedRatchets =
+                rmp_serde::from_slice(&data).map_err(|_| RnsError::PacketError)?;
+            let signature = Signature::from_slice(persisted.signature.as_ref())
+                .map_err(|_| RnsError::CryptoError)?;
+            identity
+                .verify(persisted.ratchets.as_ref(), &signature)
+                .map_err(|_| RnsError::IncorrectSignature)?;
+            let decoded: Vec<ByteBuf> =
+                rmp_serde::from_slice(persisted.ratchets.as_ref()).map_err(|_| RnsError::PacketError)?;
+            let mut ratchets = Vec::new();
+            for ratchet in decoded {
+                if ratchet.len() == RATCHET_LENGTH {
+                    let mut bytes = [0u8; RATCHET_LENGTH];
+                    bytes.copy_from_slice(ratchet.as_ref());
+                    ratchets.push(bytes);
+                }
+            }
+            self.ratchets = ratchets;
+            return Ok(());
+        }
+
+        self.ratchets = Vec::new();
+        self.persist(identity, path)?;
+        Ok(())
+    }
+
+    fn persist(&self, identity: &PrivateIdentity, path: &Path) -> Result<(), RnsError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| RnsError::PacketError)?;
+        }
+        let packed = pack_ratchets(&self.ratchets)?;
+        let signature = identity.sign(&packed).to_bytes();
+        let persisted = PersistedRatchets {
+            signature: ByteBuf::from(signature.to_vec()),
+            ratchets: ByteBuf::from(packed),
+        };
+        let encoded = rmp_serde::to_vec(&persisted).map_err(|_| RnsError::PacketError)?;
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, encoded).map_err(|_| RnsError::PacketError)?;
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        std::fs::rename(&tmp_path, path).map_err(|_| RnsError::PacketError)?;
+        Ok(())
+    }
+
+    fn rotate_if_needed(
+        &mut self,
+        identity: &PrivateIdentity,
+        now: f64,
+    ) -> Result<(), RnsError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let last = self.latest_ratchet_time.unwrap_or(0.0);
+        if self.ratchets.is_empty() || now > last + self.ratchet_interval_secs as f64 {
+            let secret = StaticSecret::random_from_rng(OsRng);
+            self.ratchets.insert(0, secret.to_bytes());
+            self.latest_ratchet_time = Some(now);
+            if self.ratchets.len() > self.retained_ratchets {
+                self.ratchets.truncate(self.retained_ratchets);
+            }
+            if let Some(path) = self.ratchets_path.clone() {
+                self.persist(identity, &path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn current_ratchet_public(&self) -> Option<[u8; RATCHET_LENGTH]> {
+        let ratchet = self.ratchets.first()?;
+        let secret = StaticSecret::from(*ratchet);
+        let public = PublicKey::from(&secret);
+        let mut bytes = [0u8; RATCHET_LENGTH];
+        bytes.copy_from_slice(public.as_bytes());
+        Some(bytes)
+    }
+}
+
+fn pack_ratchets(ratchets: &[[u8; RATCHET_LENGTH]]) -> Result<Vec<u8>, RnsError> {
+    let list: Vec<ByteBuf> = ratchets.iter().map(|bytes| ByteBuf::from(bytes.to_vec())).collect();
+    rmp_serde::to_vec(&list).map_err(|_| RnsError::PacketError)
+}
 
 #[derive(Copy, Clone)]
 pub struct DestinationName {
@@ -212,24 +346,31 @@ impl DestinationAnnounce {
             return Err(RnsError::OutOfMemory);
         }
 
-        if remaining >= SIGNATURE_LENGTH + RATCHET_LENGTH {
+        let has_ratchet = matches!(
+            packet.header.propagation_type,
+            PropagationType::Reserved1 | PropagationType::Reserved2
+        );
+
+        if has_ratchet {
+            if remaining < SIGNATURE_LENGTH + RATCHET_LENGTH {
+                return Err(RnsError::OutOfMemory);
+            }
             let ratchet = &announce_data[offset..offset + RATCHET_LENGTH];
             let sig_start = offset + RATCHET_LENGTH;
             let sig_end = sig_start + SIGNATURE_LENGTH;
             let signature = &announce_data[sig_start..sig_end];
             let app_data = &announce_data[sig_end..];
-            if verify_announce(Some(ratchet), signature, app_data).is_ok() {
-                let mut ratchet_bytes = [0u8; RATCHET_LENGTH];
-                ratchet_bytes.copy_from_slice(ratchet);
-                return Ok(AnnounceInfo {
-                    destination: SingleOutputDestination::new(
-                        identity,
-                        DestinationName::new_from_hash_slice(name_hash),
-                    ),
-                    app_data,
-                    ratchet: Some(ratchet_bytes),
-                });
-            }
+            verify_announce(Some(ratchet), signature, app_data)?;
+            let mut ratchet_bytes = [0u8; RATCHET_LENGTH];
+            ratchet_bytes.copy_from_slice(ratchet);
+            return Ok(AnnounceInfo {
+                destination: SingleOutputDestination::new(
+                    identity,
+                    DestinationName::new_from_hash_slice(name_hash),
+                ),
+                app_data,
+                ratchet: Some(ratchet_bytes),
+            });
         }
 
         let signature = &announce_data[offset..(offset + SIGNATURE_LENGTH)];
@@ -252,6 +393,7 @@ pub struct Destination<I: HashIdentity, D: Direction, T: Type> {
     pub r#type: PhantomData<T>,
     pub identity: I,
     pub desc: DestinationDesc,
+    ratchet_state: RatchetState,
 }
 
 impl<I: HashIdentity, D: Direction, T: Type> Destination<I, D, T> {
@@ -306,11 +448,68 @@ impl Destination<PrivateIdentity, Input, Single> {
                 name,
                 address_hash,
             },
+            ratchet_state: RatchetState::default(),
         }
     }
 
+    pub fn enable_ratchets<P: AsRef<Path>>(&mut self, path: P) -> Result<(), RnsError> {
+        let path = path.as_ref().to_path_buf();
+        self.ratchet_state.enable(&self.identity, path)
+    }
+
+    pub fn set_retained_ratchets(&mut self, retained: usize) -> Result<(), RnsError> {
+        if retained == 0 {
+            return Err(RnsError::InvalidArgument);
+        }
+        self.ratchet_state.retained_ratchets = retained;
+        if self.ratchet_state.ratchets.len() > retained {
+            self.ratchet_state.ratchets.truncate(retained);
+        }
+        Ok(())
+    }
+
+    pub fn set_ratchet_interval_secs(&mut self, secs: u64) -> Result<(), RnsError> {
+        if secs == 0 {
+            return Err(RnsError::InvalidArgument);
+        }
+        self.ratchet_state.ratchet_interval_secs = secs;
+        Ok(())
+    }
+
+    pub fn enforce_ratchets(&mut self, enforce: bool) {
+        self.ratchet_state.enforce_ratchets = enforce;
+    }
+
+    pub fn decrypt_with_ratchets(
+        &mut self,
+        ciphertext: &[u8],
+    ) -> Result<(Vec<u8>, bool), RnsError> {
+        let salt = self.identity.as_identity().address_hash.as_slice();
+        if self.ratchet_state.enabled && !self.ratchet_state.ratchets.is_empty() {
+            if let Some(plaintext) = try_decrypt_with_ratchets(&self.ratchet_state, salt, ciphertext)
+            {
+                return Ok((plaintext, true));
+            }
+            if let Some(path) = self.ratchet_state.ratchets_path.clone() {
+                if self.ratchet_state.reload(&self.identity, &path).is_ok() {
+                    if let Some(plaintext) =
+                        try_decrypt_with_ratchets(&self.ratchet_state, salt, ciphertext)
+                    {
+                        return Ok((plaintext, true));
+                    }
+                }
+            }
+            if self.ratchet_state.enforce_ratchets {
+                return Err(RnsError::CryptoError);
+            }
+        }
+
+        let plaintext = decrypt_with_identity(&self.identity, salt, ciphertext)?;
+        Ok((plaintext, false))
+    }
+
     pub fn announce<R: CryptoRngCore + Copy>(
-        &self,
+        &mut self,
         rng: R,
         app_data: Option<&[u8]>,
     ) -> Result<Packet, RnsError> {
@@ -322,12 +521,24 @@ impl Destination<PrivateIdentity, Input, Single> {
         let pub_key = self.identity.as_identity().public_key_bytes();
         let verifying_key = self.identity.as_identity().verifying_key_bytes();
 
+        let ratchet = if self.ratchet_state.enabled {
+            let now = now_secs();
+            self.ratchet_state.rotate_if_needed(&self.identity, now)?;
+            self.ratchet_state.current_ratchet_public()
+        } else {
+            None
+        };
+
         packet_data
             .chain_safe_write(self.desc.address_hash.as_slice())
             .chain_safe_write(pub_key)
             .chain_safe_write(verifying_key)
             .chain_safe_write(self.desc.name.as_name_hash_slice())
             .chain_safe_write(rand_hash);
+
+        if let Some(ratchet) = ratchet {
+            packet_data.chain_safe_write(&ratchet);
+        }
 
         if let Some(data) = app_data {
             packet_data.write(data)?;
@@ -341,18 +552,30 @@ impl Destination<PrivateIdentity, Input, Single> {
             .chain_safe_write(pub_key)
             .chain_safe_write(verifying_key)
             .chain_safe_write(self.desc.name.as_name_hash_slice())
-            .chain_safe_write(rand_hash)
-            .chain_safe_write(&signature.to_bytes());
+            .chain_safe_write(rand_hash);
+
+        if let Some(ratchet) = ratchet {
+            packet_data.chain_safe_write(&ratchet);
+        }
+
+        packet_data.chain_safe_write(&signature.to_bytes());
 
         if let Some(data) = app_data {
             packet_data.write(data)?;
         }
 
+        let propagation_type = if ratchet.is_some() {
+            // Encode the ratchet context flag (bit 5) for Python compatibility.
+            PropagationType::Reserved1
+        } else {
+            PropagationType::Broadcast
+        };
+
         Ok(Packet {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
-                propagation_type: PropagationType::Broadcast,
+                propagation_type,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Announce,
                 hops: 0,
@@ -366,7 +589,7 @@ impl Destination<PrivateIdentity, Input, Single> {
     }
 
     pub fn path_response<R: CryptoRngCore + Copy>(
-        &self,
+        &mut self,
         rng: R,
         app_data: Option<&[u8]>,
     ) -> Result<Packet, RnsError> {
@@ -406,6 +629,7 @@ impl Destination<Identity, Output, Single> {
                 name,
                 address_hash,
             },
+            ratchet_state: RatchetState::default(),
         }
     }
 }
@@ -422,6 +646,7 @@ impl<D: Direction> Destination<EmptyIdentity, D, Plain> {
                 name,
                 address_hash,
             },
+            ratchet_state: RatchetState::default(),
         }
     }
 }
@@ -434,6 +659,46 @@ fn create_address_hash<I: HashIdentity>(identity: &I, name: &DestinationName) ->
             .finalize()
             .into(),
     ))
+}
+
+fn try_decrypt_with_ratchets(
+    state: &RatchetState,
+    salt: &[u8],
+    ciphertext: &[u8],
+) -> Option<Vec<u8>> {
+    for ratchet in &state.ratchets {
+        let secret = StaticSecret::from(*ratchet);
+        if let Ok(plaintext) = decrypt_with_private_key(&secret, salt, ciphertext) {
+            return Some(plaintext);
+        }
+    }
+    None
+}
+
+fn decrypt_with_identity(
+    identity: &PrivateIdentity,
+    salt: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, RnsError> {
+    if ciphertext.len() <= PUBLIC_KEY_LENGTH {
+        return Err(RnsError::InvalidArgument);
+    }
+    let mut pub_bytes = [0u8; PUBLIC_KEY_LENGTH];
+    pub_bytes.copy_from_slice(&ciphertext[..PUBLIC_KEY_LENGTH]);
+    let ephemeral_public = PublicKey::from(pub_bytes);
+    let derived = identity.derive_key(&ephemeral_public, Some(salt));
+    let key_bytes = derived.as_bytes();
+    let split = key_bytes.len() / 2;
+    let fernet = Fernet::new_from_slices(
+        &key_bytes[..split],
+        &key_bytes[split..],
+        rand_core::OsRng,
+    );
+    let token = Token::from(&ciphertext[PUBLIC_KEY_LENGTH..]);
+    let verified = fernet.verify(token).map_err(|_| RnsError::CryptoError)?;
+    let mut out = vec![0u8; ciphertext.len()];
+    let plain = fernet.decrypt(verified, &mut out).map_err(|_| RnsError::CryptoError)?;
+    Ok(plain.as_bytes().to_vec())
 }
 
 pub type SingleInputDestination = Destination<PrivateIdentity, Input, Single>;
@@ -452,6 +717,7 @@ pub fn new_out(identity: Identity, app_name: &str, aspect: &str) -> SingleOutput
 #[cfg(test)]
 mod tests {
     use rand_core::OsRng;
+    use tempfile::TempDir;
 
     use crate::buffer::OutputBuffer;
     use crate::hash::Hash;
@@ -460,13 +726,14 @@ mod tests {
 
     use super::DestinationAnnounce;
     use super::DestinationName;
+    use super::RATCHET_LENGTH;
     use super::SingleInputDestination;
 
     #[test]
     fn create_announce() {
         let identity = PrivateIdentity::new_from_rand(OsRng);
 
-        let single_in_destination =
+        let mut single_in_destination =
             SingleInputDestination::new(identity, DestinationName::new("test", "in"));
 
         let announce_packet = single_in_destination
@@ -505,7 +772,7 @@ mod tests {
 
         println!("identity hash {}", priv_identity.as_identity().address_hash);
 
-        let destination = SingleInputDestination::new(
+        let mut destination = SingleInputDestination::new(
             priv_identity,
             DestinationName::new("example_utilities", "announcesample.fruits"),
         );
@@ -529,7 +796,7 @@ mod tests {
     fn check_announce() {
         let priv_identity = PrivateIdentity::new_from_rand(OsRng);
 
-        let destination = SingleInputDestination::new(
+        let mut destination = SingleInputDestination::new(
             priv_identity,
             DestinationName::new("example_utilities", "announcesample.fruits"),
         );
@@ -539,5 +806,45 @@ mod tests {
             .expect("valid announce packet");
 
         DestinationAnnounce::validate(&announce).expect("valid announce");
+    }
+
+    #[test]
+    fn announce_includes_ratchet_when_enabled() {
+        let temp = TempDir::new().expect("temp dir");
+        let priv_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut destination = SingleInputDestination::new(
+            priv_identity,
+            DestinationName::new("example_utilities", "announcesample.fruits"),
+        );
+        let ratchet_path = temp
+            .path()
+            .join("ratchets")
+            .join(format!("{}.ratchets", destination.desc.address_hash.to_hex_string()));
+        destination
+            .enable_ratchets(&ratchet_path)
+            .expect("enable ratchets");
+
+        let announce = destination
+            .announce(OsRng, None)
+            .expect("valid announce packet");
+        let info = DestinationAnnounce::validate(&announce).expect("valid announce");
+        assert!(info.ratchet.is_some());
+    }
+
+    #[test]
+    fn announce_without_ratchet_flag_ignores_ratchet_bytes() {
+        let priv_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut destination = SingleInputDestination::new(
+            priv_identity,
+            DestinationName::new("example_utilities", "announcesample.fruits"),
+        );
+
+        let app_data = vec![0u8; RATCHET_LENGTH];
+        let announce = destination
+            .announce(OsRng, Some(&app_data))
+            .expect("valid announce packet");
+        let info = DestinationAnnounce::validate(&announce).expect("valid announce");
+        assert!(info.ratchet.is_none());
+        assert_eq!(info.app_data, app_data.as_slice());
     }
 }

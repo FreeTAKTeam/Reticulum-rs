@@ -1186,6 +1186,7 @@ dependencies = [
  "rand_core",
  "rmp",
  "rmp-serde",
+ "rmpv",
  "rusqlite",
  "serde",
  "serde_bytes",

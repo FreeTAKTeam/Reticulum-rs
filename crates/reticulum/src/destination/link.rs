@@ -43,6 +43,8 @@ pub type LinkId = AddressHash;
 pub struct LinkPayload {
     buffer: [u8; PACKET_MDU],
     len: usize,
+    context: PacketContext,
+    request_id: Option<[u8; ADDRESS_HASH_SIZE]>,
 }
 
 impl LinkPayload {
@@ -50,17 +52,38 @@ impl LinkPayload {
         Self {
             buffer: [0u8; PACKET_MDU],
             len: 0,
+            context: PacketContext::None,
+            request_id: None,
         }
     }
 
     pub fn new_from_slice(data: &[u8]) -> Self {
+        Self::new_from_slice_with_context(data, PacketContext::None)
+    }
+
+    pub fn new_from_slice_with_context(data: &[u8], context: PacketContext) -> Self {
         let mut buffer = [0u8; PACKET_MDU];
 
         let len = min(data.len(), buffer.len());
 
         buffer[..len].copy_from_slice(&data[..len]);
 
-        Self { buffer, len }
+        Self {
+            buffer,
+            len,
+            context,
+            request_id: None,
+        }
+    }
+
+    pub fn new_from_slice_with_context_and_request_id(
+        data: &[u8],
+        context: PacketContext,
+        request_id: Option<[u8; ADDRESS_HASH_SIZE]>,
+    ) -> Self {
+        let mut payload = Self::new_from_slice_with_context(data, context);
+        payload.request_id = request_id;
+        payload
     }
 
     pub fn new_from_vec(data: &[u8]) -> Self {
@@ -72,11 +95,21 @@ impl LinkPayload {
         Self {
             buffer,
             len: data.len(),
+            context: PacketContext::None,
+            request_id: None,
         }
     }
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn context(&self) -> PacketContext {
+        self.context
+    }
+
+    pub fn request_id(&self) -> Option<[u8; ADDRESS_HASH_SIZE]> {
+        self.request_id
     }
 
     pub fn is_empty(&self) -> bool {
@@ -307,7 +340,10 @@ impl Link {
         }
 
         match packet.context {
-            PacketContext::None => {
+            PacketContext::None
+            | PacketContext::Request
+            | PacketContext::Response
+            | PacketContext::LinkIdentify => {
                 let mut buffer = [0u8; PACKET_MDU];
                 if let Ok(plain_text) = self.decrypt(packet.data.as_slice(), &mut buffer[..]) {
                     let preview_len = plain_text.len().min(32);
@@ -318,7 +354,21 @@ impl Link {
                     );
                     log::trace!("link({}): data {}B", self.id, plain_text.len());
                     self.request_time = Instant::now();
-                    self.post_event(LinkEvent::Data(Box::new(LinkPayload::new_from_slice(plain_text))));
+                    let request_id = if packet.context == PacketContext::Request {
+                        let hash = packet.hash().to_bytes();
+                        let mut id = [0u8; ADDRESS_HASH_SIZE];
+                        id.copy_from_slice(&hash[..ADDRESS_HASH_SIZE]);
+                        Some(id)
+                    } else {
+                        None
+                    };
+                    self.post_event(LinkEvent::Data(Box::new(
+                        LinkPayload::new_from_slice_with_context_and_request_id(
+                            plain_text,
+                            packet.context,
+                            request_id,
+                        ),
+                    )));
                     return LinkHandleResult::Proof(self.prove_packet(packet));
                 } else {
                     log::error!("link({}): can't decrypt packet", self.id);
@@ -438,6 +488,10 @@ impl Link {
 
     pub fn destination(&self) -> &DestinationDesc {
         &self.destination
+    }
+
+    pub fn peer_identity(&self) -> &Identity {
+        &self.peer_identity
     }
 
     pub fn create_rtt(&self) -> Packet {
