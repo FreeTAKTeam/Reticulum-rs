@@ -34,7 +34,7 @@ use crate::destination::SingleInputDestination;
 use crate::destination::SingleOutputDestination;
 
 use crate::hash::{AddressHash, Hash, HASH_SIZE};
-use crate::identity::PrivateIdentity;
+use crate::identity::{Identity, PrivateIdentity};
 use crate::error::RnsError;
 
 use crate::iface::InterfaceManager;
@@ -770,6 +770,19 @@ impl Transport {
 
     pub async fn knows_destination(&self, address: &AddressHash) -> bool {
         self.handler.lock().await.knows_destination(address)
+    }
+
+    pub async fn destination_identity(&self, address: &AddressHash) -> Option<Identity> {
+        let destination = {
+            self.handler
+                .lock()
+                .await
+                .single_out_destinations
+                .get(address)
+                .cloned()
+        }?;
+        let destination = destination.lock().await;
+        Some(destination.identity)
     }
 
     #[cfg(test)]
