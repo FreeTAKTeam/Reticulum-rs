@@ -219,19 +219,26 @@ git commit -m "feat(reticulumd): consume inbound link payloads"
 
 **Step 1: Run reticulumd**
 
+Set these local checkout paths first:
+
 ```bash
-/Users/tommy/Documents/TAK/Reticulum-rs/target/debug/reticulumd \
+RETICULUM_RS_REPO=<local clone of https://github.com/FreeTAKTeam/Reticulum-rs>
+LXMF_RS_REPO=<local clone of https://github.com/FreeTAKTeam/LXMF-rs>
+```
+
+```bash
+"$RETICULUM_RS_REPO"/target/debug/reticulumd \
   --rpc 127.0.0.1:4243 \
   --transport 0.0.0.0:4242 \
-  --db /Users/tommy/Documents/TAK/LXMF-rs/tmp/host-reticulum.db \
+  --db "$LXMF_RS_REPO"/tmp/host-reticulum.db \
   --announce-interval-secs 0
 ```
 
 **Step 2: Send DIRECT from python**
 
 ```bash
-/Users/tommy/Documents/TAK/LXMF-rs/tmp/python-lxmd/.venv/bin/python -u \
-  /Users/tommy/Documents/TAK/LXMF-rs/tmp/python-lxmd/interop_sender.py \
+"$LXMF_RS_REPO"/tmp/python-lxmd/.venv/bin/python -u \
+  "$LXMF_RS_REPO"/tmp/python-lxmd/interop_sender.py \
   <CURRENT_DELIVERY_HASH> "hello direct"
 ```
 

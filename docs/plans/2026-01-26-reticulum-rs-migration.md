@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Achieve feature and wire-format parity between Python Reticulum in `/Users/tommy/Documents/TAK/Reticulum` and Rust Reticulum in `/Users/tommy/Documents/TAK/Reticulum-rs`, including core protocol, interfaces, and utilities.
+**Goal:** Achieve feature and wire-format parity between Python Reticulum in `/Users/tommy/Documents/TAK/Reticulum` and Rust Reticulum in `https://github.com/FreeTAKTeam/Reticulum-rs`, including core protocol, interfaces, and utilities.
 
 **Architecture:** Implement Rust modules to mirror Python’s RNS stack, using compatibility-first behavior and golden Python fixtures. Core primitives (crypto, hashes, packet framing, identities, destinations, links, resources) come first, then transport tables and interfaces, then CLI utilities and config compatibility. A shared parity matrix drives sequencing and status.
 
