@@ -748,20 +748,9 @@ async fn main() {
                                 data.len(),
                                 hex::encode(event.destination.as_slice())
                             );
-                            let payload = match decrypt_with_identity(
-                                &inbound_identity,
-                                inbound_identity.address_hash().as_slice(),
-                                data,
-                            ) {
-                                Ok(plain) => plain,
-                                Err(err) => {
-                                    eprintln!("[daemon] decrypt failed: {:?}", err);
-                                    data.to_vec()
-                                }
-                            };
                             let mut destination = [0u8; 16];
                             destination.copy_from_slice(event.destination.as_slice());
-                            if let Some(record) = decode_inbound_payload(destination, &payload) {
+                            if let Some(record) = decode_inbound_payload(destination, data) {
                                 let _ = daemon_inbound.accept_inbound(record);
                             }
                         }
