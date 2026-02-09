@@ -1,14 +1,13 @@
 use clap::Parser;
 use reticulum::e2e_harness::is_ready_line;
 use reticulum::e2e_harness::message_present;
-use reticulum::e2e_harness::simulated_announce_notice;
+use reticulum::e2e_harness::peer_present;
 use reticulum::e2e_harness::timestamp_millis;
-use reticulum::e2e_harness::{build_announce_params, peer_present};
 use reticulum::e2e_harness::{build_daemon_args, Cli, Command};
 use reticulum::e2e_harness::{build_http_post, parse_http_response_body};
-use reticulum::e2e_harness::{build_receive_params, build_send_params, simulated_delivery_notice};
 use reticulum::e2e_harness::{build_rpc_body, parse_rpc_response};
 use reticulum::e2e_harness::{build_rpc_frame, parse_rpc_frame};
+use reticulum::e2e_harness::{build_send_params, build_tcp_client_config};
 use serde_json::json;
 
 #[test]
@@ -63,26 +62,23 @@ fn http_response_body_extracts_payload() {
 }
 
 #[test]
-fn rpc_param_builders_include_required_fields() {
+fn send_params_include_required_fields() {
     let send = build_send_params("msg-1", "alice", "bob", "hi");
-    let receive = build_receive_params("msg-2", "carol", "dave", "yo");
     assert_eq!(send["id"], "msg-1");
     assert_eq!(send["source"], "alice");
     assert_eq!(send["destination"], "bob");
     assert_eq!(send["content"], "hi");
     assert!(send.get("fields").is_some());
-    assert_eq!(receive["id"], "msg-2");
-    assert_eq!(receive["source"], "carol");
-    assert_eq!(receive["destination"], "dave");
-    assert_eq!(receive["content"], "yo");
 }
 
 #[test]
-fn simulated_notice_mentions_simulated_delivery() {
-    let note = simulated_delivery_notice("127.0.0.1:4243", "127.0.0.1:4244");
-    assert!(note.to_lowercase().contains("simulated"));
-    assert!(note.contains("127.0.0.1:4243"));
-    assert!(note.contains("127.0.0.1:4244"));
+fn tcp_client_config_includes_required_fields() {
+    let config = build_tcp_client_config("127.0.0.1", 4242);
+    assert!(config.contains("[[interfaces]]"));
+    assert!(config.contains("type = \"tcp_client\""));
+    assert!(config.contains("enabled = true"));
+    assert!(config.contains("host = \"127.0.0.1\""));
+    assert!(config.contains("port = 4242"));
 }
 
 #[test]
@@ -107,13 +103,6 @@ fn timestamp_millis_is_nonzero() {
 }
 
 #[test]
-fn announce_params_include_peer() {
-    let params = build_announce_params("peer-123", Some(42));
-    assert_eq!(params["peer"], "peer-123");
-    assert_eq!(params["timestamp"], 42);
-}
-
-#[test]
 fn peer_present_detects_peer() {
     let response = reticulum::rpc::RpcResponse {
         id: 1,
@@ -130,14 +119,6 @@ fn peer_present_detects_peer() {
 }
 
 #[test]
-fn simulated_announce_notice_mentions_simulated() {
-    let note = simulated_announce_notice("127.0.0.1:4243", "127.0.0.1:4244");
-    assert!(note.to_lowercase().contains("simulated"));
-    assert!(note.contains("4243"));
-    assert!(note.contains("4244"));
-}
-
-#[test]
 fn cli_parses_e2e() {
     let cli = Cli::parse_from(["rnx", "e2e"]);
     assert!(matches!(cli.command, Command::E2e { .. }));
@@ -145,7 +126,7 @@ fn cli_parses_e2e() {
 
 #[test]
 fn daemon_args_include_rpc_and_db() {
-    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0, None);
+    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0, None, None);
     assert!(args.contains(&"--rpc".to_string()));
     assert!(args.contains(&"127.0.0.1:4243".to_string()));
     assert!(args.contains(&"--db".to_string()));
@@ -154,7 +135,20 @@ fn daemon_args_include_rpc_and_db() {
 
 #[test]
 fn daemon_args_include_transport_when_set() {
-    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0, Some("0.0.0.0:4242"));
+    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0, Some("0.0.0.0:4242"), None);
     assert!(args.contains(&"--transport".to_string()));
     assert!(args.contains(&"0.0.0.0:4242".to_string()));
+}
+
+#[test]
+fn daemon_args_include_config_when_set() {
+    let args = build_daemon_args(
+        "127.0.0.1:4243",
+        "db.sqlite",
+        0,
+        Some("0.0.0.0:4242"),
+        Some("reticulum.toml"),
+    );
+    assert!(args.contains(&"--config".to_string()));
+    assert!(args.contains(&"reticulum.toml".to_string()));
 }

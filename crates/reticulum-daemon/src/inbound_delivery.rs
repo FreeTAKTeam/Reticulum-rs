@@ -3,16 +3,27 @@ use reticulum::storage::messages::MessageRecord;
 use crate::lxmf_bridge::{decode_wire_message, rmpv_to_json};
 
 pub fn decode_inbound_payload(destination: [u8; 16], payload: &[u8]) -> Option<MessageRecord> {
-    let (message, raw_bytes) = match decode_wire_message(payload) {
-        Ok(message) => (message, payload.to_vec()),
-        Err(_) => {
-            let mut lxmf_bytes = Vec::with_capacity(16 + payload.len());
-            lxmf_bytes.extend_from_slice(&destination);
-            lxmf_bytes.extend_from_slice(payload);
-            let message = decode_wire_message(&lxmf_bytes).ok()?;
-            (message, lxmf_bytes)
+    let mut decode_candidates = Vec::with_capacity(3);
+    decode_candidates.push(payload.to_vec());
+
+    let mut with_destination_prefix = Vec::with_capacity(16 + payload.len());
+    with_destination_prefix.extend_from_slice(&destination);
+    with_destination_prefix.extend_from_slice(payload);
+    decode_candidates.push(with_destination_prefix);
+
+    if payload.len() > 16 && payload[..16] == destination {
+        decode_candidates.push(payload[16..].to_vec());
+    }
+
+    let mut decoded: Option<(lxmf::message::Message, Vec<u8>)> = None;
+    for candidate in decode_candidates {
+        if let Ok(message) = decode_wire_message(&candidate) {
+            decoded = Some((message, candidate));
+            break;
         }
-    };
+    }
+
+    let (message, raw_bytes) = decoded?;
     let id = lxmf::message::WireMessage::unpack(&raw_bytes)
         .ok()
         .map(|wire| wire.message_id())

@@ -19,7 +19,7 @@ pub enum Command {
         a_port: u16,
         #[arg(long, default_value_t = 4244)]
         b_port: u16,
-        #[arg(long, default_value_t = 5)]
+        #[arg(long, default_value_t = 60)]
         timeout_secs: u64,
         #[arg(long, default_value_t = false)]
         keep: bool,
@@ -92,6 +92,7 @@ pub fn build_daemon_args(
     db_path: &str,
     announce_interval_secs: u64,
     transport: Option<&str>,
+    config: Option<&str>,
 ) -> Vec<String> {
     let mut args = vec![
         "--rpc".to_string(),
@@ -105,6 +106,11 @@ pub fn build_daemon_args(
     if let Some(transport) = transport {
         args.push("--transport".to_string());
         args.push(transport.to_string());
+    }
+
+    if let Some(config) = config {
+        args.push("--config".to_string());
+        args.push(config.to_string());
     }
 
     args
@@ -125,25 +131,10 @@ pub fn build_send_params(
     })
 }
 
-pub fn build_receive_params(
-    message_id: &str,
-    source: &str,
-    destination: &str,
-    content: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "id": message_id,
-        "source": source,
-        "destination": destination,
-        "content": content,
-        "fields": serde_json::Value::Null,
-    })
-}
-
-pub fn simulated_delivery_notice(a_rpc: &str, b_rpc: &str) -> String {
+pub fn build_tcp_client_config(host: &str, port: u16) -> String {
     format!(
-        "Simulated delivery: sending via {} then injecting into {}",
-        a_rpc, b_rpc
+        "[[interfaces]]\ntype = \"tcp_client\"\nenabled = true\nhost = \"{}\"\nport = {}\n",
+        host, port
     )
 }
 
@@ -166,13 +157,6 @@ pub fn timestamp_millis() -> u128 {
         .unwrap_or(0)
 }
 
-pub fn build_announce_params(peer: &str, timestamp: Option<i64>) -> serde_json::Value {
-    serde_json::json!({
-        "peer": peer,
-        "timestamp": timestamp,
-    })
-}
-
 pub fn peer_present(response: &crate::rpc::RpcResponse, peer: &str) -> bool {
     let Some(result) = response.result.as_ref() else {
         return false;
@@ -183,8 +167,4 @@ pub fn peer_present(response: &crate::rpc::RpcResponse, peer: &str) -> bool {
     peers
         .iter()
         .any(|entry| entry.get("peer").and_then(|value| value.as_str()) == Some(peer))
-}
-
-pub fn simulated_announce_notice(a_rpc: &str, b_rpc: &str) -> String {
-    format!("Simulated announce delivery: {} -> {}", a_rpc, b_rpc)
 }
