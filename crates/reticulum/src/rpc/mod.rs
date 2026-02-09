@@ -140,6 +140,14 @@ pub struct RpcEvent {
 pub struct PeerRecord {
     pub peer: String,
     pub last_seen: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub name_source: Option<String>,
+    #[serde(default)]
+    pub first_seen: i64,
+    #[serde(default)]
+    pub seen_count: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +188,10 @@ struct RecordReceiptParams {
 struct AnnounceReceivedParams {
     peer: String,
     timestamp: Option<i64>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    name_source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,21 +379,64 @@ impl RpcDaemon {
     }
 
     pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
-        let record = PeerRecord {
-            peer,
-            last_seen: timestamp,
-        };
-        {
-            let mut guard = self.peers.lock().expect("peers mutex poisoned");
-            guard.insert(record.peer.clone(), record.clone());
-        }
+        self.accept_announce_with_details(peer, timestamp, None, None)
+    }
+
+    pub fn accept_announce_with_details(
+        &self,
+        peer: String,
+        timestamp: i64,
+        name: Option<String>,
+        name_source: Option<String>,
+    ) -> Result<(), std::io::Error> {
+        let record = self.upsert_peer(peer, timestamp, name, name_source);
         let event = RpcEvent {
             event_type: "announce_received".into(),
-            payload: json!({ "peer": record.peer, "timestamp": record.last_seen }),
+            payload: json!({
+                "peer": record.peer,
+                "timestamp": record.last_seen,
+                "name": record.name,
+                "name_source": record.name_source,
+                "first_seen": record.first_seen,
+                "seen_count": record.seen_count,
+            }),
         };
         self.push_event(event.clone());
         let _ = self.events.send(event);
         Ok(())
+    }
+
+    fn upsert_peer(
+        &self,
+        peer: String,
+        timestamp: i64,
+        name: Option<String>,
+        name_source: Option<String>,
+    ) -> PeerRecord {
+        let cleaned_name = clean_optional_text(name);
+        let cleaned_name_source = clean_optional_text(name_source);
+
+        let mut guard = self.peers.lock().expect("peers mutex poisoned");
+        if let Some(existing) = guard.get_mut(&peer) {
+            existing.last_seen = timestamp;
+            existing.seen_count = existing.seen_count.saturating_add(1);
+            if let Some(name) = cleaned_name {
+                existing.name = Some(name);
+                existing.name_source = cleaned_name_source;
+            }
+            return existing.clone();
+        }
+
+        let record = PeerRecord {
+            peer: peer.clone(),
+            last_seen: timestamp,
+            name: cleaned_name,
+            name_source: cleaned_name_source,
+            first_seen: timestamp,
+            seen_count: 1,
+        };
+        guard.insert(peer, record.clone());
+        record
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -459,13 +514,18 @@ impl RpcDaemon {
                 })
             }
             "list_peers" => {
-                let peers = self
+                let mut peers = self
                     .peers
                     .lock()
                     .expect("peers mutex poisoned")
                     .values()
                     .cloned()
                     .collect::<Vec<_>>();
+                peers.sort_by(|a, b| {
+                    b.last_seen
+                        .cmp(&a.last_seen)
+                        .then_with(|| a.peer.cmp(&b.peer))
+                });
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "peers": peers })),
@@ -552,17 +612,17 @@ impl RpcDaemon {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
                 let timestamp = now_i64();
-                let record = PeerRecord {
-                    peer: parsed.peer,
-                    last_seen: timestamp,
-                };
-                {
-                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
-                    guard.insert(record.peer.clone(), record.clone());
-                }
+                let record = self.upsert_peer(parsed.peer, timestamp, None, None);
                 let event = RpcEvent {
                     event_type: "peer_sync".into(),
-                    payload: json!({ "peer": record.peer, "timestamp": timestamp }),
+                    payload: json!({
+                        "peer": record.peer.clone(),
+                        "timestamp": timestamp,
+                        "name": record.name.clone(),
+                        "name_source": record.name_source.clone(),
+                        "first_seen": record.first_seen,
+                        "seen_count": record.seen_count,
+                    }),
                 };
                 self.push_event(event.clone());
                 let _ = self.events.send(event);
@@ -984,17 +1044,17 @@ impl RpcDaemon {
                 let parsed: AnnounceReceivedParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = parsed.timestamp.unwrap_or_else(now_i64);
-                let record = PeerRecord {
-                    peer: parsed.peer,
-                    last_seen: timestamp,
-                };
-                {
-                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
-                    guard.insert(record.peer.clone(), record.clone());
-                }
+                let record = self.upsert_peer(parsed.peer, timestamp, parsed.name, parsed.name_source);
                 let event = RpcEvent {
                     event_type: "announce_received".into(),
-                    payload: json!({ "peer": record.peer, "timestamp": record.last_seen }),
+                    payload: json!({
+                        "peer": record.peer.clone(),
+                        "timestamp": record.last_seen,
+                        "name": record.name.clone(),
+                        "name_source": record.name_source.clone(),
+                        "first_seen": record.first_seen,
+                        "seen_count": record.seen_count,
+                    }),
                 };
                 self.push_event(event.clone());
                 let _ = self.events.send(event);
@@ -1251,6 +1311,12 @@ fn now_i64() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn clean_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn encode_hex(bytes: impl AsRef<[u8]>) -> String {

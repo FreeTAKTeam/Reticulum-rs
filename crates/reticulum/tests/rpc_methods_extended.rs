@@ -85,6 +85,9 @@ fn peer_sync_and_unpeer_work() {
         .expect("peers");
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0]["peer"], "abcd0123");
+    assert_eq!(peers[0]["seen_count"], 1);
+    assert!(peers[0]["first_seen"].as_i64().is_some());
+    assert!(peers[0]["last_seen"].as_i64().is_some());
 
     let unpeer = daemon
         .handle_rpc(RpcRequest {
@@ -246,7 +249,10 @@ fn stamp_policy_and_ticket_generation() {
             params: None,
         })
         .expect("stamp_policy_get");
-    assert_eq!(get.result.expect("result")["stamp_policy"]["target_cost"], 10);
+    assert_eq!(
+        get.result.expect("result")["stamp_policy"]["target_cost"],
+        10
+    );
 
     let ticket = daemon
         .handle_rpc(RpcRequest {
