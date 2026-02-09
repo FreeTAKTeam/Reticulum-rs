@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use sha2::Digest;
 
+use crate::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
 use crate::destination::link::Link;
 use crate::error::RnsError;
-use crate::crypt::fernet::{FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
-use crate::hash::{AddressHash, Hash, HASH_SIZE, ADDRESS_HASH_SIZE};
-use crate::packet::{Header, Packet, PacketContext, PacketDataBuffer, PacketType, PACKET_MDU};
+use crate::hash::{AddressHash, Hash, ADDRESS_HASH_SIZE, HASH_SIZE};
 use crate::packet::DestinationType;
+use crate::packet::{Header, Packet, PacketContext, PacketDataBuffer, PacketType, PACKET_MDU};
 
 pub const WINDOW: usize = 4;
 pub const MAPHASH_LEN: usize = 4;
@@ -23,10 +23,11 @@ const HEADER_MINSIZE: usize = 2 + 1 + ADDRESS_HASH_SIZE;
 const HEADER_MAXSIZE: usize = 2 + 1 + (ADDRESS_HASH_SIZE * 2);
 const IFAC_MIN_SIZE: usize = 1;
 const RETICULUM_MTU: usize = PACKET_MDU + HEADER_MAXSIZE + IFAC_MIN_SIZE;
-pub const LINK_PACKET_MDU: usize = ((RETICULUM_MTU - IFAC_MIN_SIZE - HEADER_MINSIZE - FERNET_OVERHEAD_SIZE)
-    / FERNET_MAX_PADDING_SIZE)
-    * FERNET_MAX_PADDING_SIZE
-    - 1;
+pub const LINK_PACKET_MDU: usize =
+    ((RETICULUM_MTU - IFAC_MIN_SIZE - HEADER_MINSIZE - FERNET_OVERHEAD_SIZE)
+        / FERNET_MAX_PADDING_SIZE)
+        * FERNET_MAX_PADDING_SIZE
+        - 1;
 pub const HASHMAP_MAX_LEN: usize =
     (LINK_PACKET_MDU.saturating_sub(ADVERTISEMENT_OVERHEAD)) / MAPHASH_LEN;
 
@@ -184,7 +185,9 @@ pub struct ResourceRequest {
 
 impl ResourceRequest {
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1 + MAPHASH_LEN + HASH_SIZE + self.requested_hashes.len() * MAPHASH_LEN);
+        let mut out = Vec::with_capacity(
+            1 + MAPHASH_LEN + HASH_SIZE + self.requested_hashes.len() * MAPHASH_LEN,
+        );
         if self.hashmap_exhausted {
             out.push(0xFF);
             if let Some(last) = self.last_map_hash {
@@ -245,10 +248,7 @@ pub struct ResourceHashUpdate {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ResourceHashUpdateFrame(
-    u32,
-    #[serde(with = "serde_bytes")] Vec<u8>,
-);
+struct ResourceHashUpdateFrame(u32, #[serde(with = "serde_bytes")] Vec<u8>);
 
 impl ResourceHashUpdate {
     pub fn encode(&self) -> Result<Vec<u8>, RnsError> {
@@ -296,7 +296,10 @@ impl ResourceProof {
         }
         let resource_hash = Hash::new(copy_hash(&data[..HASH_SIZE])?);
         let proof = Hash::new(copy_hash(&data[HASH_SIZE..HASH_SIZE * 2])?);
-        Ok(Self { resource_hash, proof })
+        Ok(Self {
+            resource_hash,
+            proof,
+        })
     }
 }
 
@@ -335,7 +338,7 @@ impl ResourceSender {
         let data_size = combined.len() as u64;
         let mut hasher = sha2::Sha256::new();
         hasher.update(&combined);
-        hasher.update(&random_hash);
+        hasher.update(random_hash);
         let resource_hash = Hash::new(copy_hash(&hasher.finalize())?);
 
         let mut proof_hasher = sha2::Sha256::new();
@@ -405,12 +408,9 @@ impl ResourceSender {
         for hash in &request.requested_hashes {
             if let Some(index) = self.map_hashes.iter().position(|entry| entry == hash) {
                 if let Some(part) = self.parts.get(index) {
-                    if let Ok(packet) = build_link_packet(
-                        link,
-                        PacketType::Data,
-                        PacketContext::Resource,
-                        part,
-                    ) {
+                    if let Ok(packet) =
+                        build_link_packet(link, PacketType::Data, PacketContext::Resource, part)
+                    {
                         packets.push(packet);
                     } else {
                         log::warn!("resource: failed to build resource packet");
@@ -421,7 +421,9 @@ impl ResourceSender {
 
         if request.hashmap_exhausted {
             if let Some(last_hash) = request.last_map_hash {
-                if let Some(last_index) = self.map_hashes.iter().position(|entry| *entry == last_hash) {
+                if let Some(last_index) =
+                    self.map_hashes.iter().position(|entry| *entry == last_hash)
+                {
                     let next_segment = (last_index / HASHMAP_MAX_LEN) + 1;
                     if next_segment * HASHMAP_MAX_LEN < self.map_hashes.len() {
                         let update = ResourceHashUpdate {
@@ -446,7 +448,8 @@ impl ResourceSender {
             }
         }
 
-        if self.status == ResourceStatus::Advertised || self.status == ResourceStatus::Transferring {
+        if self.status == ResourceStatus::Advertised || self.status == ResourceStatus::Transferring
+        {
             self.status = ResourceStatus::Transferring;
         }
 
@@ -491,6 +494,7 @@ struct ResourcePayload {
     metadata: Option<Vec<u8>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum PartOutcome {
     NoMatch,
     Incomplete,
@@ -589,9 +593,7 @@ impl ResourceReceiver {
         if self.parts[index].is_none() {
             self.parts[index] = Some(part.to_vec());
             self.received += 1;
-            self.received_bytes = self
-                .received_bytes
-                .saturating_add(part.len() as u64);
+            self.received_bytes = self.received_bytes.saturating_add(part.len() as u64);
             self.last_progress = Instant::now();
         }
 
@@ -635,32 +637,32 @@ impl ResourceReceiver {
                 payload = decompressed;
             }
 
-                let (metadata, data_payload) = if self.has_metadata && payload.len() >= 3 {
-                    let size = ((payload[0] as usize) << 16)
-                        | ((payload[1] as usize) << 8)
-                        | payload[2] as usize;
-                    if size > METADATA_MAX_SIZE {
-                        self.status = ResourceStatus::Failed;
-                        return PartOutcome::Incomplete;
-                    }
-                    if payload.len() >= 3 + size {
-                        let meta = payload[3..3 + size].to_vec();
-                        let data = payload[3 + size..].to_vec();
-                        (Some(meta), data)
-                    } else {
-                        (None, payload.clone())
-                    }
+            let (metadata, data_payload) = if self.has_metadata && payload.len() >= 3 {
+                let size = ((payload[0] as usize) << 16)
+                    | ((payload[1] as usize) << 8)
+                    | payload[2] as usize;
+                if size > METADATA_MAX_SIZE {
+                    self.status = ResourceStatus::Failed;
+                    return PartOutcome::Incomplete;
+                }
+                if payload.len() >= 3 + size {
+                    let meta = payload[3..3 + size].to_vec();
+                    let data = payload[3 + size..].to_vec();
+                    (Some(meta), data)
                 } else {
                     (None, payload.clone())
-                };
+                }
+            } else {
+                (None, payload.clone())
+            };
 
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(&payload);
-                hasher.update(&self.random_hash);
-                let computed = match copy_hash(&hasher.finalize()) {
-                    Ok(hash) => Hash::new(hash),
-                    Err(_) => {
-                        self.status = ResourceStatus::Failed;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&payload);
+            hasher.update(self.random_hash);
+            let computed = match copy_hash(&hasher.finalize()) {
+                Ok(hash) => Hash::new(hash),
+                Err(_) => {
+                    self.status = ResourceStatus::Failed;
                     return PartOutcome::Incomplete;
                 }
             };
@@ -983,8 +985,8 @@ fn build_link_packet(
     payload: &[u8],
 ) -> Result<Packet, RnsError> {
     let mut packet_data = PacketDataBuffer::new();
-    let should_encrypt =
-        context != PacketContext::Resource && !(packet_type == PacketType::Proof && context == PacketContext::ResourceProof);
+    let should_encrypt = context != PacketContext::Resource
+        && !(packet_type == PacketType::Proof && context == PacketContext::ResourceProof);
     if should_encrypt {
         let cipher_text_len = {
             let cipher_text = link.encrypt(payload, packet_data.accuire_buf_max())?;

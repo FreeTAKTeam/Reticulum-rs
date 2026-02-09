@@ -1,5 +1,7 @@
 use rand_core::CryptoRngCore;
-use reticulum::crypt::fernet::{Fernet, PlainText, Token, FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+use reticulum::crypt::fernet::{
+    Fernet, PlainText, Token, FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE,
+};
 use reticulum::error::RnsError;
 use reticulum::identity::{DerivedKey, PrivateIdentity, PUBLIC_KEY_LENGTH};
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
@@ -18,10 +20,11 @@ pub fn encrypt_for_public_key<R: CryptoRngCore + Copy>(
     let split = key_bytes.len() / 2;
 
     let fernet = Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rng);
-    let mut out = vec![
-        0u8;
-        PUBLIC_KEY_LENGTH + plaintext.len() + FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE
-    ];
+    let mut out =
+        vec![
+            0u8;
+            PUBLIC_KEY_LENGTH + plaintext.len() + FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE
+        ];
     out[..PUBLIC_KEY_LENGTH].copy_from_slice(ephemeral_public.as_bytes());
     let token = fernet.encrypt(PlainText::from(plaintext), &mut out[PUBLIC_KEY_LENGTH..])?;
     let total = PUBLIC_KEY_LENGTH + token.len();
@@ -45,7 +48,8 @@ pub fn decrypt_with_private_key(
     let key_bytes = derived.as_bytes();
     let split = key_bytes.len() / 2;
 
-    let fernet = Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
+    let fernet =
+        Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
     let token = Token::from(&ciphertext[PUBLIC_KEY_LENGTH..]);
     let verified = fernet.verify(token)?;
     let mut out = vec![0u8; ciphertext.len()];
@@ -68,11 +72,8 @@ pub fn decrypt_with_identity(
     let key_bytes = derived.as_bytes();
     let split = key_bytes.len() / 2;
 
-    let fernet = Fernet::new_from_slices(
-        &key_bytes[..split],
-        &key_bytes[split..],
-        rand_core::OsRng,
-    );
+    let fernet =
+        Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
     let token = Token::from(&ciphertext[PUBLIC_KEY_LENGTH..]);
     let verified = fernet.verify(token)?;
     let mut out = vec![0u8; ciphertext.len()];

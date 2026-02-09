@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
-reticulum = { path = "../reticulum" }
+reticulum = { package = "reticulum-rs", path = "../reticulum" }
 lxmf = { path = "../../../LXMF-rs" }
 clap = { version = "4.5.29", features = ["derive"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }

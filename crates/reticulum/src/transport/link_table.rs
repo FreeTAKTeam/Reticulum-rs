@@ -79,14 +79,17 @@ impl LinkTable {
             original_destination: destination,
             taken_hops,
             remaining_hops: 0,
-            validated: false
+            validated: false,
         };
 
         self.entries.insert(link_id, entry);
     }
 
     pub fn original_destination(&self, link_id: &LinkId) -> Option<AddressHash> {
-        self.entries.get(link_id).filter(|e| e.validated).map(|e| e.original_destination)
+        self.entries
+            .get(link_id)
+            .filter(|e| e.validated)
+            .map(|e| e.original_destination)
     }
 
     pub fn handle_keepalive(&mut self, packet: &Packet) -> Option<(Packet, AddressHash)> {
@@ -105,8 +108,8 @@ impl LinkTable {
                 entry.timestamp = Instant::now();
 
                 Some(send_backwards(proof, entry))
-            },
-            None => None
+            }
+            None => None,
         }
     }
 

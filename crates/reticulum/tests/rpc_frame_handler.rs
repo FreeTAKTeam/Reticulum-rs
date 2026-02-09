@@ -1,4 +1,6 @@
-use reticulum::rpc::{codec::encode_frame, codec::decode_frame, RpcDaemon, RpcRequest, RpcResponse};
+use reticulum::rpc::{
+    codec::decode_frame, codec::encode_frame, RpcDaemon, RpcRequest, RpcResponse,
+};
 
 #[test]
 fn handles_framed_rpc_request() {

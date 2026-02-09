@@ -9,3 +9,6 @@ members = [
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/BeechatNetworkSystemsLtd/Reticulum-rs"
+
+[patch.crates-io]
+reticulum-rs = { path = "crates/reticulum" }

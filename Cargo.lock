@@ -871,12 +871,13 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 name = "lxmf"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "clap",
  "ed25519-dalek",
  "hex",
  "hkdf",
  "rand_core",
- "reticulum",
+ "reticulum-rs",
  "rmp-serde",
  "rmpv",
  "serde",
@@ -885,6 +886,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "toml",
  "x25519-dalek",
 ]
 
@@ -1189,7 +1191,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
-name = "reticulum"
+name = "reticulum-daemon"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "lxmf",
+ "rand_core",
+ "reticulum-rs",
+ "rmp-serde",
+ "rmpv",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "x25519-dalek",
+]
+
+[[package]]
+name = "reticulum-rs"
 version = "0.1.0"
 dependencies = [
  "aes",
@@ -1219,25 +1240,6 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-build",
- "x25519-dalek",
-]
-
-[[package]]
-name = "reticulum-daemon"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "lxmf",
- "rand_core",
- "reticulum",
- "rmp-serde",
- "rmpv",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
  "x25519-dalek",
 ]
 

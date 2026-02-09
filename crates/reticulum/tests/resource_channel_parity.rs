@@ -116,12 +116,7 @@ fn channel_send_and_receive() {
     });
 
     let seq = channel.send(0x2001, b"ping".to_vec()).expect("send");
-    let raw = channel
-        .outlet()
-        .sent
-        .last()
-        .expect("sent payload")
-        .clone();
+    let raw = channel.outlet().sent.last().expect("sent payload").clone();
 
     channel.receive(&raw).expect("receive");
     assert_eq!(channel.state(seq), reticulum::channel::MessageState::Sent);

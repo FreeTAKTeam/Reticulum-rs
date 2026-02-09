@@ -1,5 +1,5 @@
-use reticulum::rpc::{RpcDaemon, RpcEvent};
 use reticulum::rpc::RpcRequest;
+use reticulum::rpc::{RpcDaemon, RpcEvent};
 use serde_json::json;
 
 #[test]

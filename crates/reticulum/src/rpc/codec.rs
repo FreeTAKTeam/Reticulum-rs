@@ -15,7 +15,10 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> io::Result<Vec<u8>> {
 
 pub fn decode_frame<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
     if bytes.len() < 4 {
-        return Err(io::Error::new(ErrorKind::UnexpectedEof, "missing frame header"));
+        return Err(io::Error::new(
+            ErrorKind::UnexpectedEof,
+            "missing frame header",
+        ));
     }
     let mut len_buf = [0u8; 4];
     len_buf.copy_from_slice(&bytes[..4]);

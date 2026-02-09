@@ -161,7 +161,10 @@ impl RpcDaemon {
     }
 
     pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
-        let record = PeerRecord { peer, last_seen: timestamp };
+        let record = PeerRecord {
+            peer,
+            last_seen: timestamp,
+        };
         {
             let mut guard = self.peers.lock().expect("peers mutex poisoned");
             guard.insert(record.peer.clone(), record.clone());
@@ -219,9 +222,9 @@ impl RpcDaemon {
                 })
             }
             "send_message" => {
-                let params = request
-                    .params
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
                 let parsed: SendMessageParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = std::time::SystemTime::now()
@@ -260,9 +263,9 @@ impl RpcDaemon {
                 })
             }
             "receive_message" => {
-                let params = request
-                    .params
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
                 let parsed: SendMessageParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = std::time::SystemTime::now()
@@ -288,9 +291,9 @@ impl RpcDaemon {
                 })
             }
             "record_receipt" => {
-                let params = request
-                    .params
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
                 let parsed: RecordReceiptParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 self.store
@@ -304,7 +307,9 @@ impl RpcDaemon {
                 let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "message_id": parsed.message_id, "status": parsed.status })),
+                    result: Some(
+                        json!({ "message_id": parsed.message_id, "status": parsed.status }),
+                    ),
                     error: None,
                 })
             }
@@ -329,9 +334,9 @@ impl RpcDaemon {
                 })
             }
             "announce_received" => {
-                let params = request
-                    .params
-                    .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params"))?;
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
                 let parsed: AnnounceReceivedParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = parsed.timestamp.unwrap_or_else(|| {
@@ -361,9 +366,7 @@ impl RpcDaemon {
                 })
             }
             "clear_messages" => {
-                self.store
-                    .clear_messages()
-                    .map_err(std::io::Error::other)?;
+                self.store.clear_messages().map_err(std::io::Error::other)?;
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "cleared": "messages" })),
@@ -387,9 +390,7 @@ impl RpcDaemon {
                 })
             }
             "clear_all" => {
-                self.store
-                    .clear_messages()
-                    .map_err(std::io::Error::other)?;
+                self.store.clear_messages().map_err(std::io::Error::other)?;
                 {
                     let mut guard = self.peers.lock().expect("peers mutex poisoned");
                     guard.clear();
@@ -415,8 +416,7 @@ impl RpcDaemon {
         let request: RpcRequest = codec::decode_frame(bytes)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
         let response = self.handle_rpc(request)?;
-        codec::encode_frame(&response)
-            .map_err(std::io::Error::other)
+        codec::encode_frame(&response).map_err(std::io::Error::other)
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<RpcEvent> {
@@ -424,18 +424,12 @@ impl RpcDaemon {
     }
 
     pub fn take_event(&self) -> Option<RpcEvent> {
-        let mut guard = self
-            .event_queue
-            .lock()
-            .expect("event_queue mutex poisoned");
+        let mut guard = self.event_queue.lock().expect("event_queue mutex poisoned");
         guard.pop_front()
     }
 
     pub fn push_event(&self, event: RpcEvent) {
-        let mut guard = self
-            .event_queue
-            .lock()
-            .expect("event_queue mutex poisoned");
+        let mut guard = self.event_queue.lock().expect("event_queue mutex poisoned");
         if guard.len() >= 32 {
             guard.pop_front();
         }
@@ -455,7 +449,10 @@ impl RpcDaemon {
         let _ = self.events.send(event);
     }
 
-    pub fn start_announce_scheduler(self: std::rc::Rc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+    pub fn start_announce_scheduler(
+        self: std::rc::Rc<Self>,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_local(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
             interval.tick().await;
@@ -505,9 +502,6 @@ impl RpcDaemon {
     }
 }
 
-pub fn handle_framed_request(
-    daemon: &RpcDaemon,
-    bytes: &[u8],
-) -> Result<Vec<u8>, std::io::Error> {
+pub fn handle_framed_request(daemon: &RpcDaemon, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     daemon.handle_framed_request(bytes)
 }

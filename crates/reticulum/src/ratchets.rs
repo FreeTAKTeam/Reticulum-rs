@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 
-use crate::crypt::fernet::{Fernet, PlainText, Token, FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE};
+use crate::crypt::fernet::{
+    Fernet, PlainText, Token, FERNET_MAX_PADDING_SIZE, FERNET_OVERHEAD_SIZE,
+};
 use crate::error::RnsError;
 use crate::hash::AddressHash;
 use crate::identity::{DerivedKey, PUBLIC_KEY_LENGTH};
@@ -78,7 +80,8 @@ impl RatchetStore {
     }
 
     pub(crate) fn clean_expired(&mut self, now: f64) {
-        self.cache.retain(|_, record| now <= record.received + RATCHET_EXPIRY_SECS);
+        self.cache
+            .retain(|_, record| now <= record.received + RATCHET_EXPIRY_SECS);
         if let Ok(entries) = fs::read_dir(&self.ratchet_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -140,10 +143,11 @@ pub(crate) fn encrypt_for_public_key<R: CryptoRngCore + Copy>(
     let split = key_bytes.len() / 2;
 
     let fernet = Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rng);
-    let mut out = vec![
-        0u8;
-        PUBLIC_KEY_LENGTH + plaintext.len() + FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE
-    ];
+    let mut out =
+        vec![
+            0u8;
+            PUBLIC_KEY_LENGTH + plaintext.len() + FERNET_OVERHEAD_SIZE + FERNET_MAX_PADDING_SIZE
+        ];
     out[..PUBLIC_KEY_LENGTH].copy_from_slice(ephemeral_public.as_bytes());
     let token = fernet
         .encrypt(PlainText::from(plaintext), &mut out[PUBLIC_KEY_LENGTH..])
@@ -169,11 +173,14 @@ pub(crate) fn decrypt_with_private_key(
     let key_bytes = derived.as_bytes();
     let split = key_bytes.len() / 2;
 
-    let fernet = Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
+    let fernet =
+        Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
     let token = Token::from(&ciphertext[PUBLIC_KEY_LENGTH..]);
     let verified = fernet.verify(token).map_err(|_| RnsError::CryptoError)?;
     let mut out = vec![0u8; ciphertext.len()];
-    let plain = fernet.decrypt(verified, &mut out).map_err(|_| RnsError::CryptoError)?;
+    let plain = fernet
+        .decrypt(verified, &mut out)
+        .map_err(|_| RnsError::CryptoError)?;
     Ok(plain.as_bytes().to_vec())
 }
 

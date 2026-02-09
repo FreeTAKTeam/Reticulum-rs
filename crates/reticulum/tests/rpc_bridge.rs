@@ -8,7 +8,10 @@ struct TestBridge {
 }
 
 impl OutboundBridge for TestBridge {
-    fn deliver(&self, _record: &reticulum::storage::messages::MessageRecord) -> Result<(), std::io::Error> {
+    fn deliver(
+        &self,
+        _record: &reticulum::storage::messages::MessageRecord,
+    ) -> Result<(), std::io::Error> {
         let mut guard = self.calls.lock().expect("calls");
         *guard += 1;
         Ok(())
@@ -18,7 +21,9 @@ impl OutboundBridge for TestBridge {
 #[test]
 fn send_message_calls_bridge() {
     let calls = Arc::new(Mutex::new(0));
-    let bridge = TestBridge { calls: calls.clone() };
+    let bridge = TestBridge {
+        calls: calls.clone(),
+    };
     let daemon = RpcDaemon::with_store_and_bridge(
         reticulum::storage::messages::MessagesStore::in_memory().expect("store"),
         "test".into(),

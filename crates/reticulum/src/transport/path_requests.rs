@@ -1,4 +1,4 @@
-use alloc::collections::{BTreeSet, BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use rand_core::OsRng;
 
@@ -21,8 +21,8 @@ use crate::packet::PropagationType;
 
 pub fn create_path_request_destination() -> PlainInputDestination {
     PlainInputDestination::new(
-        EmptyIdentity { },
-        DestinationName::new("rnstransport","path.request")
+        EmptyIdentity {},
+        DestinationName::new("rnstransport", "path.request"),
     )
 }
 
@@ -35,7 +35,7 @@ pub fn create_random_tag() -> TagBytes {
 pub struct PathRequest {
     pub destination: AddressHash,
     pub requesting_transport: Option<AddressHash>,
-    pub tag_bytes: TagBytes
+    pub tag_bytes: TagBytes,
 }
 
 impl PathRequest {
@@ -44,7 +44,11 @@ impl PathRequest {
             log::info!(
                 "tp({}): ignoring malformed path request: no {}",
                 transport_name,
-                if data.len() < ADDRESS_HASH_SIZE { "destination" } else { "tag" }
+                if data.len() < ADDRESS_HASH_SIZE {
+                    "destination"
+                } else {
+                    "tag"
+                }
             );
             return None;
         }
@@ -58,11 +62,9 @@ impl PathRequest {
         let mut tag_end = data.len();
 
         if data.len() > ADDRESS_HASH_SIZE * 2 {
-            requesting_transport = Some(
-                AddressHash::new_from_slice(
-                    &data[ADDRESS_HASH_SIZE..2*ADDRESS_HASH_SIZE]
-                )
-            );
+            requesting_transport = Some(AddressHash::new_from_slice(
+                &data[ADDRESS_HASH_SIZE..2 * ADDRESS_HASH_SIZE],
+            ));
             tag_start = ADDRESS_HASH_SIZE * 2;
         }
 
@@ -72,7 +74,11 @@ impl PathRequest {
 
         let tag_bytes = data[tag_start..tag_end].into();
 
-        Some(Self { destination, requesting_transport, tag_bytes })
+        Some(Self {
+            destination,
+            requesting_transport,
+            tag_bytes,
+        })
     }
 }
 
@@ -113,9 +119,9 @@ impl PathRequests {
         let path_request = PathRequest::decode(data, &self.name);
 
         if let Some(ref request) = path_request {
-            let is_new = self.cache.insert(
-                (request.destination, request.tag_bytes.clone())
-            );
+            let is_new = self
+                .cache
+                .insert((request.destination, request.tag_bytes.clone()));
 
             if !is_new {
                 log::info!(
@@ -130,11 +136,7 @@ impl PathRequests {
         path_request
     }
 
-    pub fn generate(
-        &mut self,
-        destination: &AddressHash,
-        tag: Option<TagBytes>
-    ) -> Packet {
+    pub fn generate(&mut self, destination: &AddressHash, tag: Option<TagBytes>) -> Packet {
         let mut data = PacketDataBuffer::new_from_slice(destination.as_slice());
 
         if let Some(transport_id) = self.transport_id {
@@ -158,7 +160,7 @@ impl PathRequests {
             destination,
             transport: self.transport_id,
             context: PacketContext::None,
-            data
+            data,
         }
     }
 

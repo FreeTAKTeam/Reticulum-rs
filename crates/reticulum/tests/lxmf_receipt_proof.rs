@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use reticulum::packet::{Packet, PacketContext, PacketDataBuffer, PacketType};
 use reticulum::transport::{DeliveryReceipt, ReceiptHandler, Transport, TransportConfig};
@@ -27,7 +30,9 @@ impl ReceiptHandler for ReceiptCapture {
 #[tokio::test]
 async fn proof_packet_emits_receipt() {
     let count = Arc::new(AtomicUsize::new(0));
-    let handler = Counter { count: Arc::clone(&count) };
+    let handler = Counter {
+        count: Arc::clone(&count),
+    };
 
     let mut transport = Transport::new(TransportConfig::default());
     transport.set_receipt_handler(Box::new(handler)).await;

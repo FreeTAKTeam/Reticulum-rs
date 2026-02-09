@@ -12,8 +12,7 @@ use crate::hash::ADDRESS_HASH_SIZE;
 // Match Python Reticulum default MTU (500) minus max header and IFAC sizes.
 // 500 - (2 + 1 + 16*2) - 1 = 464
 pub const PACKET_MDU: usize = 464usize;
-pub const LXMF_MAX_PAYLOAD: usize =
-    PACKET_MDU - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE;
+pub const LXMF_MAX_PAYLOAD: usize = PACKET_MDU - FERNET_OVERHEAD_SIZE - FERNET_MAX_PADDING_SIZE;
 pub const PACKET_IFAC_MAX_LENGTH: usize = 64usize;
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]

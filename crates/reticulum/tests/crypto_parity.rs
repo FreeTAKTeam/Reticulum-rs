@@ -34,11 +34,8 @@ fn encrypted_payload_matches_fixture() {
 
     let sign_key = &key[..32];
     let enc_key = &key[32..];
-    let fernet = reticulum::crypt::fernet::Fernet::new_from_slices(
-        sign_key,
-        enc_key,
-        FixedRng(0x42),
-    );
+    let fernet =
+        reticulum::crypt::fernet::Fernet::new_from_slices(sign_key, enc_key, FixedRng(0x42));
 
     let out_len = plaintext.len()
         + reticulum::crypt::fernet::FERNET_OVERHEAD_SIZE

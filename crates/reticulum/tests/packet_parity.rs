@@ -12,7 +12,8 @@ fn packet_header_matches_fixture() {
 
     let fixture = std::fs::read("tests/fixtures/python/reticulum/packet_header.bin").unwrap();
     let identity_bytes = std::fs::read("tests/fixtures/python/reticulum/identity.bin").unwrap();
-    let identity = reticulum::identity::PrivateIdentity::from_private_key_bytes(&identity_bytes).unwrap();
+    let identity =
+        reticulum::identity::PrivateIdentity::from_private_key_bytes(&identity_bytes).unwrap();
     let mut destination = reticulum::destination::new_in(identity, "lxmf", "delivery");
     let packet = destination.announce(OsRng, None).unwrap();
     let bytes = packet.to_bytes().unwrap();

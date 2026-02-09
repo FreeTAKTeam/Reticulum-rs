@@ -1,13 +1,13 @@
 use clap::Parser;
 use reticulum::e2e_harness::{
-    build_announce_params, build_http_post, build_receive_params, build_rpc_frame,
-    build_send_params, build_daemon_args, is_ready_line, message_present, parse_http_response_body,
+    build_announce_params, build_daemon_args, build_http_post, build_receive_params,
+    build_rpc_frame, build_send_params, is_ready_line, message_present, parse_http_response_body,
     parse_rpc_frame, peer_present, simulated_announce_notice, simulated_delivery_notice,
     timestamp_millis, Cli, Command,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -46,7 +46,7 @@ fn run_e2e(a_port: u16, b_port: u16, timeout_secs: u64, keep: bool) -> io::Resul
         a_child
             .stdout
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "missing daemon stdout"))?,
+            .ok_or_else(|| io::Error::other("missing daemon stdout"))?,
         timeout,
     )?;
 
@@ -55,7 +55,7 @@ fn run_e2e(a_port: u16, b_port: u16, timeout_secs: u64, keep: bool) -> io::Resul
         b_child
             .stdout
             .take()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "missing daemon stdout"))?,
+            .ok_or_else(|| io::Error::other("missing daemon stdout"))?,
         timeout,
     )?;
 
@@ -113,14 +113,9 @@ fn run_e2e(a_port: u16, b_port: u16, timeout_secs: u64, keep: bool) -> io::Resul
     Ok(())
 }
 
-fn spawn_daemon(rpc: &str, db_path: &PathBuf) -> io::Result<Child> {
+fn spawn_daemon(rpc: &str, db_path: &Path) -> io::Result<Child> {
     let mut cmd = ProcessCommand::new(reticulumd_path()?);
-    cmd.args(build_daemon_args(
-        rpc,
-        &db_path.to_string_lossy(),
-        0,
-        None,
-    ));
+    cmd.args(build_daemon_args(rpc, &db_path.to_string_lossy(), 0, None));
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::inherit());
     cmd.spawn()
@@ -130,7 +125,7 @@ fn reticulumd_path() -> io::Result<PathBuf> {
     let exe = std::env::current_exe()?;
     let dir = exe
         .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "missing exe parent"))?;
+        .ok_or_else(|| io::Error::other("missing exe parent"))?;
     let candidate = dir.join("reticulumd");
     if candidate.exists() {
         Ok(candidate)

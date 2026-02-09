@@ -24,7 +24,9 @@ use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
 use reticulum_daemon::inbound_delivery::decode_inbound_payload;
 use reticulum_daemon::lxmf_bridge::build_wire_message;
-use reticulum_daemon::receipt_bridge::{handle_receipt_event, track_receipt_mapping, ReceiptBridge};
+use reticulum_daemon::receipt_bridge::{
+    handle_receipt_event, track_receipt_mapping, ReceiptBridge,
+};
 use reticulum_daemon::rns_crypto::decrypt_with_identity;
 
 #[derive(Parser, Debug)]
@@ -195,10 +197,10 @@ async fn main() {
                     )))
                     .await;
                 let iface_manager = transport_instance.iface_manager();
-                iface_manager
-                    .lock()
-                    .await
-                    .spawn(TcpServer::new(addr, iface_manager.clone()), TcpServer::spawn);
+                iface_manager.lock().await.spawn(
+                    TcpServer::new(addr, iface_manager.clone()),
+                    TcpServer::spawn,
+                );
                 if let Some(config_path) = args.config.as_ref() {
                     if let Ok(config) = DaemonConfig::from_path(config_path) {
                         for (host, port) in config.tcp_client_endpoints() {
@@ -209,16 +211,11 @@ async fn main() {
                                 .spawn(TcpClient::new(addr), TcpClient::spawn);
                             eprintln!(
                                 "[daemon] tcp_client enabled name={} host={} port={}",
-                                host,
-                                host,
-                                port
+                                host, host, port
                             );
                         }
                     } else {
-                        eprintln!(
-                            "[daemon] failed to load config: {}",
-                            config_path.display()
-                        );
+                        eprintln!("[daemon] failed to load config: {}", config_path.display());
                     }
                 }
                 eprintln!("[daemon] transport enabled");
@@ -274,7 +271,9 @@ async fn main() {
             }
 
             if args.announce_interval_secs > 0 {
-                let _handle = daemon.clone().start_announce_scheduler(args.announce_interval_secs);
+                let _handle = daemon
+                    .clone()
+                    .start_announce_scheduler(args.announce_interval_secs);
             }
 
             if let Some(transport) = transport.clone() {
@@ -325,12 +324,7 @@ async fn main() {
                             peer_crypto
                                 .lock()
                                 .expect("peer map")
-                                .insert(
-                                    peer.clone(),
-                                    PeerCrypto {
-                                        identity,
-                                    },
-                                );
+                                .insert(peer.clone(), PeerCrypto { identity });
                             eprintln!("[daemon] rx announce peer={}", peer);
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -372,8 +366,9 @@ async fn main() {
                     continue;
                 }
 
-                let response = http::handle_http_request(&daemon, &buffer)
-                    .unwrap_or_else(|err| http::build_error_response(&format!("rpc error: {}", err)));
+                let response = http::handle_http_request(&daemon, &buffer).unwrap_or_else(|err| {
+                    http::build_error_response(&format!("rpc error: {}", err))
+                });
                 let _ = stream.write_all(&response).await;
                 let _ = stream.shutdown().await;
             }

@@ -418,10 +418,7 @@ impl DecryptIdentity for PrivateIdentity {
     }
 }
 
-pub fn lxmf_sign(
-    identity: &PrivateIdentity,
-    data: &[u8],
-) -> [u8; ed25519_dalek::SIGNATURE_LENGTH] {
+pub fn lxmf_sign(identity: &PrivateIdentity, data: &[u8]) -> [u8; ed25519_dalek::SIGNATURE_LENGTH] {
     identity.sign(data).to_bytes()
 }
 

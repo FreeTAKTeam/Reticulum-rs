@@ -1,7 +1,7 @@
 use std::io;
 
-use reticulum::destination::DestinationDesc;
 use reticulum::destination::link::{LinkEvent, LinkStatus};
+use reticulum::destination::DestinationDesc;
 use reticulum::packet::Packet;
 use reticulum::transport::Transport;
 use tokio::time::{timeout, Duration, Instant};
@@ -61,7 +61,7 @@ pub async fn send_via_link(
         .lock()
         .await
         .data_packet(payload)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{:?}", err)))?;
+        .map_err(|err| io::Error::other(format!("{:?}", err)))?;
     transport.send_packet(packet).await;
 
     Ok(packet)

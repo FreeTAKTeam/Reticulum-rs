@@ -1,5 +1,7 @@
 use reticulum::identity::PrivateIdentity;
-use reticulum_daemon::lxmf_bridge::{build_wire_message, decode_wire_message, json_to_rmpv, rmpv_to_json};
+use reticulum_daemon::lxmf_bridge::{
+    build_wire_message, decode_wire_message, json_to_rmpv, rmpv_to_json,
+};
 
 #[test]
 fn wire_roundtrip_preserves_content_title_fields() {

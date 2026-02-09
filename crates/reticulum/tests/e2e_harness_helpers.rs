@@ -1,19 +1,21 @@
+use clap::Parser;
 use reticulum::e2e_harness::is_ready_line;
-use reticulum::e2e_harness::{build_rpc_body, parse_rpc_response};
-use reticulum::e2e_harness::{build_http_post, parse_http_response_body};
-use reticulum::e2e_harness::{build_rpc_frame, parse_rpc_frame};
-use reticulum::e2e_harness::{build_receive_params, build_send_params, simulated_delivery_notice};
 use reticulum::e2e_harness::message_present;
+use reticulum::e2e_harness::simulated_announce_notice;
 use reticulum::e2e_harness::timestamp_millis;
 use reticulum::e2e_harness::{build_announce_params, peer_present};
-use reticulum::e2e_harness::simulated_announce_notice;
 use reticulum::e2e_harness::{build_daemon_args, Cli, Command};
-use clap::Parser;
+use reticulum::e2e_harness::{build_http_post, parse_http_response_body};
+use reticulum::e2e_harness::{build_receive_params, build_send_params, simulated_delivery_notice};
+use reticulum::e2e_harness::{build_rpc_body, parse_rpc_response};
+use reticulum::e2e_harness::{build_rpc_frame, parse_rpc_frame};
 use serde_json::json;
 
 #[test]
 fn ready_line_detects_daemon_listening() {
-    assert!(is_ready_line("reticulumd listening on http://127.0.0.1:4243"));
+    assert!(is_ready_line(
+        "reticulumd listening on http://127.0.0.1:4243"
+    ));
     assert!(!is_ready_line("starting daemon..."));
 }
 
@@ -152,12 +154,7 @@ fn daemon_args_include_rpc_and_db() {
 
 #[test]
 fn daemon_args_include_transport_when_set() {
-    let args = build_daemon_args(
-        "127.0.0.1:4243",
-        "db.sqlite",
-        0,
-        Some("0.0.0.0:4242"),
-    );
+    let args = build_daemon_args("127.0.0.1:4243", "db.sqlite", 0, Some("0.0.0.0:4242"));
     assert!(args.contains(&"--transport".to_string()));
     assert!(args.contains(&"0.0.0.0:4242".to_string()));
 }

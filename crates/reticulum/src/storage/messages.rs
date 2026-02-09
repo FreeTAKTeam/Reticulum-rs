@@ -111,11 +111,7 @@ impl MessagesStore {
         Ok(records)
     }
 
-    pub fn update_receipt_status(
-        &self,
-        message_id: &str,
-        status: &str,
-    ) -> rusqlite::Result<()> {
+    pub fn update_receipt_status(&self, message_id: &str, status: &str) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE messages SET receipt_status = ?1 WHERE id = ?2",
             params![status, message_id],

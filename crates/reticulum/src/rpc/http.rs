@@ -14,8 +14,7 @@ pub fn handle_http_request(daemon: &RpcDaemon, request: &[u8]) -> io::Result<Vec
     match (method.as_str(), path.as_str()) {
         ("GET", "/events") => {
             if let Some(event) = daemon.take_event() {
-                let body = codec::encode_frame(&event)
-                    .map_err(io::Error::other)?;
+                let body = codec::encode_frame(&event).map_err(io::Error::other)?;
                 Ok(build_response(StatusCode::Ok, &body))
             } else {
                 Ok(build_response(StatusCode::NoContent, &[]))
@@ -26,7 +25,10 @@ pub fn handle_http_request(daemon: &RpcDaemon, request: &[u8]) -> io::Result<Vec
                 io::Error::new(io::ErrorKind::InvalidInput, "missing content-length")
             })?;
             if request.len() < body_start + content_length {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "body incomplete"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "body incomplete",
+                ));
             }
             let body = &request[body_start..body_start + content_length];
             let response_body = handle_framed_request(daemon, body)?;

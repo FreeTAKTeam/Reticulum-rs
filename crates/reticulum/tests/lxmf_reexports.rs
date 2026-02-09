@@ -1,8 +1,8 @@
+use reticulum::identity::{Identity, PrivateIdentity};
 use reticulum::{
     group_decrypt, group_encrypt, lxmf_address_hash, lxmf_sign, lxmf_verify, DeliveryReceipt,
-    LXMF_MAX_PAYLOAD, Packet, ReceiptHandler,
+    Packet, ReceiptHandler, LXMF_MAX_PAYLOAD,
 };
-use reticulum::identity::{Identity, PrivateIdentity};
 
 struct NoopReceipt;
 

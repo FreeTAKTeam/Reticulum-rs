@@ -27,7 +27,7 @@ pub fn decode_inbound_payload(destination: [u8; 16], payload: &[u8]) -> Option<M
         content: message.content_as_string().unwrap_or_default(),
         timestamp: message.timestamp.map(|v| v as i64).unwrap_or(0),
         direction: "in".into(),
-        fields: message.fields.as_ref().and_then(|value| rmpv_to_json(value)),
+        fields: message.fields.as_ref().and_then(rmpv_to_json),
         receipt_status: None,
     })
 }

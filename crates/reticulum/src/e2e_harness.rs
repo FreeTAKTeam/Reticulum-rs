@@ -5,6 +5,9 @@ use std::io;
 #[derive(Parser, Debug)]
 #[command(name = "rnx")]
 pub struct Cli {
+    #[arg(long)]
+    pub config: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -27,11 +30,7 @@ pub fn is_ready_line(line: &str) -> bool {
     line.contains("listening on http://")
 }
 
-pub fn build_rpc_body(
-    id: u64,
-    method: &str,
-    params: Option<serde_json::Value>,
-) -> String {
+pub fn build_rpc_body(id: u64, method: &str, params: Option<serde_json::Value>) -> String {
     let request = crate::rpc::RpcRequest {
         id,
         method: method.to_string(),
@@ -40,9 +39,7 @@ pub fn build_rpc_body(
     serde_json::to_string(&request).unwrap_or_default()
 }
 
-pub fn parse_rpc_response(
-    input: &str,
-) -> Result<crate::rpc::RpcResponse, serde_json::Error> {
+pub fn parse_rpc_response(input: &str) -> Result<crate::rpc::RpcResponse, serde_json::Error> {
     serde_json::from_str(input)
 }
 
@@ -157,12 +154,9 @@ pub fn message_present(response: &crate::rpc::RpcResponse, message_id: &str) -> 
     let Some(messages) = result.get("messages").and_then(|value| value.as_array()) else {
         return false;
     };
-    messages.iter().any(|message| {
-        message
-            .get("id")
-            .and_then(|value| value.as_str())
-            == Some(message_id)
-    })
+    messages
+        .iter()
+        .any(|message| message.get("id").and_then(|value| value.as_str()) == Some(message_id))
 }
 
 pub fn timestamp_millis() -> u128 {
@@ -186,9 +180,9 @@ pub fn peer_present(response: &crate::rpc::RpcResponse, peer: &str) -> bool {
     let Some(peers) = result.get("peers").and_then(|value| value.as_array()) else {
         return false;
     };
-    peers.iter().any(|entry| {
-        entry.get("peer").and_then(|value| value.as_str()) == Some(peer)
-    })
+    peers
+        .iter()
+        .any(|entry| entry.get("peer").and_then(|value| value.as_str()) == Some(peer))
 }
 
 pub fn simulated_announce_notice(a_rpc: &str, b_rpc: &str) -> String {

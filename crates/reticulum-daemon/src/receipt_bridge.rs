@@ -1,9 +1,9 @@
-use reticulum::transport::{DeliveryReceipt, ReceiptHandler};
 use reticulum::rpc::{RpcDaemon, RpcRequest};
+use reticulum::transport::{DeliveryReceipt, ReceiptHandler};
+use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
-use serde_json::json;
 
 #[derive(Debug, Clone)]
 pub struct ReceiptEvent {
@@ -18,7 +18,10 @@ pub struct ReceiptBridge {
 }
 
 impl ReceiptBridge {
-    pub fn new(map: Arc<Mutex<HashMap<String, String>>>, tx: UnboundedSender<ReceiptEvent>) -> Self {
+    pub fn new(
+        map: Arc<Mutex<HashMap<String, String>>>,
+        tx: UnboundedSender<ReceiptEvent>,
+    ) -> Self {
         Self { map, tx }
     }
 }

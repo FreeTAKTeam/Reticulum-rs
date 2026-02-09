@@ -5,8 +5,8 @@ use tokio::time::{Duration, Instant};
 use crate::hash::AddressHash;
 use crate::iface::{TxMessage, TxMessageType};
 use crate::packet::{
-    DestinationType, Header, HeaderType, IfacFlag,
-    Packet, PacketContext, PacketType, PropagationType
+    DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext, PacketType,
+    PropagationType,
 };
 
 #[derive(Clone)]
@@ -34,10 +34,7 @@ impl AnnounceEntry {
         }
     }
 
-    pub fn retransmit(
-        &mut self,
-        transport_id: &AddressHash,
-    ) -> Option<TxMessage> {
+    pub fn retransmit(&mut self, transport_id: &AddressHash) -> Option<TxMessage> {
         if self.retries == 0 || Instant::now() >= self.timeout {
             return None;
         }
@@ -72,14 +69,13 @@ impl AnnounceEntry {
         };
 
         Some(TxMessage { tx_type, packet })
-
     }
 }
 
 pub struct AnnounceCache {
     newer: Option<BTreeMap<AddressHash, AnnounceEntry>>,
     older: Option<BTreeMap<AddressHash, AnnounceEntry>>,
-    capacity: usize
+    capacity: usize,
 }
 
 impl AnnounceCache {
@@ -87,7 +83,7 @@ impl AnnounceCache {
         Self {
             newer: Some(BTreeMap::new()),
             older: None,
-            capacity
+            capacity,
         }
     }
 
@@ -171,12 +167,7 @@ impl AnnounceTable {
         self.map.is_empty() && self.responses.is_empty() && self.cache.is_empty()
     }
 
-    pub fn add(
-        &mut self,
-        announce: &Packet,
-        destination: AddressHash,
-        received_from: AddressHash
-    ) {
+    pub fn add(&mut self, announce: &Packet, destination: AddressHash, received_from: AddressHash) {
         if self.map.contains_key(&destination) {
             return;
         }
@@ -216,7 +207,7 @@ impl AnnounceTable {
         &mut self,
         destination: AddressHash,
         to_iface: AddressHash,
-        hops: u8
+        hops: u8,
     ) -> bool {
         if let Some(entry) = self.map.get(&destination) {
             self.do_add_response(entry.clone(), destination, to_iface, hops);
@@ -248,10 +239,7 @@ impl AnnounceTable {
             .and_then(|e| e.retransmit(transport_id))
     }
 
-    pub fn to_retransmit(
-        &mut self,
-        transport_id: &AddressHash,
-    ) -> Vec<TxMessage> {
+    pub fn to_retransmit(&mut self, transport_id: &AddressHash) -> Vec<TxMessage> {
         let mut messages = vec![];
         let mut completed = vec![];
 

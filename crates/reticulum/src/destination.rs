@@ -19,9 +19,9 @@ use crate::{
     },
     ratchets::{decrypt_with_private_key, now_secs},
 };
-use sha2::Digest;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
+use sha2::Digest;
 use x25519_dalek::StaticSecret;
 
 //***************************************************************************//
@@ -136,8 +136,8 @@ impl RatchetState {
             identity
                 .verify(persisted.ratchets.as_ref(), &signature)
                 .map_err(|_| RnsError::IncorrectSignature)?;
-            let decoded: Vec<ByteBuf> =
-                rmp_serde::from_slice(persisted.ratchets.as_ref()).map_err(|_| RnsError::PacketError)?;
+            let decoded: Vec<ByteBuf> = rmp_serde::from_slice(persisted.ratchets.as_ref())
+                .map_err(|_| RnsError::PacketError)?;
             let mut ratchets = Vec::new();
             for ratchet in decoded {
                 if ratchet.len() == RATCHET_LENGTH {
@@ -175,11 +175,7 @@ impl RatchetState {
         Ok(())
     }
 
-    fn rotate_if_needed(
-        &mut self,
-        identity: &PrivateIdentity,
-        now: f64,
-    ) -> Result<(), RnsError> {
+    fn rotate_if_needed(&mut self, identity: &PrivateIdentity, now: f64) -> Result<(), RnsError> {
         if !self.enabled {
             return Ok(());
         }
@@ -209,7 +205,10 @@ impl RatchetState {
 }
 
 fn pack_ratchets(ratchets: &[[u8; RATCHET_LENGTH]]) -> Result<Vec<u8>, RnsError> {
-    let list: Vec<ByteBuf> = ratchets.iter().map(|bytes| ByteBuf::from(bytes.to_vec())).collect();
+    let list: Vec<ByteBuf> = ratchets
+        .iter()
+        .map(|bytes| ByteBuf::from(bytes.to_vec()))
+        .collect();
     rmp_serde::to_vec(&list).map_err(|_| RnsError::PacketError)
 }
 
@@ -310,48 +309,45 @@ impl DestinationAnnounce {
         if expected_hash != *destination {
             eprintln!(
                 "[announce] dest mismatch expected={} got={}",
-                expected_hash,
-                destination
+                expected_hash, destination
             );
         }
 
-        let verify_announce = |ratchet: Option<&[u8]>,
-                               signature: &[u8],
-                               app_data: &[u8]|
-         -> Result<(), RnsError> {
-            // Keeping signed data on stack is only option for now.
-            // Verification function doesn't support prehashed message.
-            let mut signed_data = PacketDataBuffer::new();
-            signed_data
-                .chain_write(destination.as_slice())?
-                .chain_write(public_key.as_bytes())?
-                .chain_write(verifying_key.as_bytes())?
-                .chain_write(name_hash)?
-                .chain_write(rand_hash)?;
-            if let Some(ratchet) = ratchet {
-                signed_data.chain_write(ratchet)?;
-            }
-            if !app_data.is_empty() {
-                signed_data.chain_write(app_data)?;
-            }
-            let signature =
-                Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
-            identity
-                .verify(signed_data.as_slice(), &signature)
-                .map_err(|_| RnsError::IncorrectSignature)
-        };
+        let verify_announce =
+            |ratchet: Option<&[u8]>, signature: &[u8], app_data: &[u8]| -> Result<(), RnsError> {
+                // Keeping signed data on stack is only option for now.
+                // Verification function doesn't support prehashed message.
+                let mut signed_data = PacketDataBuffer::new();
+                signed_data
+                    .chain_write(destination.as_slice())?
+                    .chain_write(public_key.as_bytes())?
+                    .chain_write(verifying_key.as_bytes())?
+                    .chain_write(name_hash)?
+                    .chain_write(rand_hash)?;
+                if let Some(ratchet) = ratchet {
+                    signed_data.chain_write(ratchet)?;
+                }
+                if !app_data.is_empty() {
+                    signed_data.chain_write(app_data)?;
+                }
+                let signature =
+                    Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+                identity
+                    .verify(signed_data.as_slice(), &signature)
+                    .map_err(|_| RnsError::IncorrectSignature)
+            };
 
         let remaining = announce_data.len().saturating_sub(offset);
         if remaining < SIGNATURE_LENGTH {
             return Err(RnsError::OutOfMemory);
         }
 
-        let has_ratchet = matches!(
+        let has_ratchet_flag = matches!(
             packet.header.propagation_type,
             PropagationType::Reserved1 | PropagationType::Reserved2
         );
 
-        if has_ratchet {
+        let parse_with_ratchet = || -> Result<AnnounceInfo<'_>, RnsError> {
             if remaining < SIGNATURE_LENGTH + RATCHET_LENGTH {
                 return Err(RnsError::OutOfMemory);
             }
@@ -363,28 +359,48 @@ impl DestinationAnnounce {
             verify_announce(Some(ratchet), signature, app_data)?;
             let mut ratchet_bytes = [0u8; RATCHET_LENGTH];
             ratchet_bytes.copy_from_slice(ratchet);
-            return Ok(AnnounceInfo {
+            Ok(AnnounceInfo {
                 destination: SingleOutputDestination::new(
                     identity,
                     DestinationName::new_from_hash_slice(name_hash),
                 ),
                 app_data,
                 ratchet: Some(ratchet_bytes),
-            });
+            })
+        };
+
+        let parse_without_ratchet = || -> Result<AnnounceInfo<'_>, RnsError> {
+            let signature = &announce_data[offset..(offset + SIGNATURE_LENGTH)];
+            let app_data = &announce_data[(offset + SIGNATURE_LENGTH)..];
+            verify_announce(None, signature, app_data)?;
+
+            Ok(AnnounceInfo {
+                destination: SingleOutputDestination::new(
+                    identity,
+                    DestinationName::new_from_hash_slice(name_hash),
+                ),
+                app_data,
+                ratchet: None,
+            })
+        };
+
+        if has_ratchet_flag {
+            return parse_with_ratchet();
         }
 
-        let signature = &announce_data[offset..(offset + SIGNATURE_LENGTH)];
-        let app_data = &announce_data[(offset + SIGNATURE_LENGTH)..];
-        verify_announce(None, signature, app_data)?;
-
-        Ok(AnnounceInfo {
-            destination: SingleOutputDestination::new(
-                identity,
-                DestinationName::new_from_hash_slice(name_hash),
-            ),
-            app_data,
-            ratchet: None,
-        })
+        // Compatibility: some Python announces may include ratchet bytes even when
+        // this header flag is not set. Prefer no-ratchet parsing first, then fall
+        // back to ratchet parsing if signature verification fails.
+        match parse_without_ratchet() {
+            Ok(info) => Ok(info),
+            Err(err_without_ratchet) => {
+                if remaining >= SIGNATURE_LENGTH + RATCHET_LENGTH {
+                    parse_with_ratchet().or(Err(err_without_ratchet))
+                } else {
+                    Err(err_without_ratchet)
+                }
+            }
+        }
     }
 }
 
@@ -486,7 +502,8 @@ impl Destination<PrivateIdentity, Input, Single> {
     ) -> Result<(Vec<u8>, bool), RnsError> {
         let salt = self.identity.as_identity().address_hash.as_slice();
         if self.ratchet_state.enabled && !self.ratchet_state.ratchets.is_empty() {
-            if let Some(plaintext) = try_decrypt_with_ratchets(&self.ratchet_state, salt, ciphertext)
+            if let Some(plaintext) =
+                try_decrypt_with_ratchets(&self.ratchet_state, salt, ciphertext)
             {
                 return Ok((plaintext, true));
             }
@@ -689,15 +706,14 @@ fn decrypt_with_identity(
     let derived = identity.derive_key(&ephemeral_public, Some(salt));
     let key_bytes = derived.as_bytes();
     let split = key_bytes.len() / 2;
-    let fernet = Fernet::new_from_slices(
-        &key_bytes[..split],
-        &key_bytes[split..],
-        rand_core::OsRng,
-    );
+    let fernet =
+        Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
     let token = Token::from(&ciphertext[PUBLIC_KEY_LENGTH..]);
     let verified = fernet.verify(token).map_err(|_| RnsError::CryptoError)?;
     let mut out = vec![0u8; ciphertext.len()];
-    let plain = fernet.decrypt(verified, &mut out).map_err(|_| RnsError::CryptoError)?;
+    let plain = fernet
+        .decrypt(verified, &mut out)
+        .map_err(|_| RnsError::CryptoError)?;
     Ok(plain.as_bytes().to_vec())
 }
 
@@ -726,8 +742,8 @@ mod tests {
 
     use super::DestinationAnnounce;
     use super::DestinationName;
-    use super::RATCHET_LENGTH;
     use super::SingleInputDestination;
+    use super::RATCHET_LENGTH;
 
     #[test]
     fn create_announce() {
@@ -816,10 +832,10 @@ mod tests {
             priv_identity,
             DestinationName::new("example_utilities", "announcesample.fruits"),
         );
-        let ratchet_path = temp
-            .path()
-            .join("ratchets")
-            .join(format!("{}.ratchets", destination.desc.address_hash.to_hex_string()));
+        let ratchet_path = temp.path().join("ratchets").join(format!(
+            "{}.ratchets",
+            destination.desc.address_hash.to_hex_string()
+        ));
         destination
             .enable_ratchets(&ratchet_path)
             .expect("enable ratchets");

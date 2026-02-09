@@ -136,7 +136,10 @@ impl<O: ChannelOutlet> Channel<O> {
     }
 
     pub fn state(&self, sequence: u16) -> MessageState {
-        self.states.get(&sequence).copied().unwrap_or(MessageState::New)
+        self.states
+            .get(&sequence)
+            .copied()
+            .unwrap_or(MessageState::New)
     }
 
     pub fn outlet(&self) -> &O {

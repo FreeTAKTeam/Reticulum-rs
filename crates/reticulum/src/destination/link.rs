@@ -150,6 +150,7 @@ impl From<&Packet> for LinkId {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum LinkHandleResult {
     None,
     Activated,
@@ -220,7 +221,9 @@ impl Link {
         );
         let signalling = if data.len() >= PUBLIC_KEY_LENGTH * 2 + LINK_MTU_SIZE {
             let mut bytes = [0u8; LINK_MTU_SIZE];
-            bytes.copy_from_slice(&data[PUBLIC_KEY_LENGTH * 2..PUBLIC_KEY_LENGTH * 2 + LINK_MTU_SIZE]);
+            bytes.copy_from_slice(
+                &data[PUBLIC_KEY_LENGTH * 2..PUBLIC_KEY_LENGTH * 2 + LINK_MTU_SIZE],
+            );
             Some(bytes)
         } else {
             None

@@ -1,5 +1,5 @@
 [package]
-name = "reticulum"
+name = "reticulum-rs"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
@@ -16,6 +16,9 @@ layer.
 This project brings Reticulum's capabilities to the Rust ecosystem, enabling embedded, and 
 constrained deployments with maximum performance and minimal dependencies.
 """
+
+[lib]
+name = "reticulum"
 
 [dependencies]
 

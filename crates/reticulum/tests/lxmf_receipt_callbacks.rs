@@ -1,4 +1,7 @@
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use reticulum::transport::{DeliveryReceipt, ReceiptHandler, Transport, TransportConfig};
 
@@ -15,7 +18,9 @@ impl ReceiptHandler for Tracker {
 #[tokio::test]
 async fn transport_emits_delivery_receipt_callback() {
     let called = Arc::new(AtomicBool::new(false));
-    let handler = Tracker { called: Arc::clone(&called) };
+    let handler = Tracker {
+        called: Arc::clone(&called),
+    };
     let mut transport = Transport::new(TransportConfig::default());
     transport.set_receipt_handler(Box::new(handler)).await;
 
