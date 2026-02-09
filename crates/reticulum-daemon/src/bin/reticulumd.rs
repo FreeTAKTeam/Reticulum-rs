@@ -777,21 +777,15 @@ async fn main() {
                         if let Ok(event) = rx.recv().await {
                             let dest = event.destination.lock().await;
                             let peer = hex::encode(dest.desc.address_hash.as_slice());
-                            let public_key = *dest.desc.identity.public_key.as_bytes();
-                            let mut identity_hash = [0u8; 16];
-                            identity_hash.copy_from_slice(dest.desc.identity.address_hash.as_slice());
                             let identity = dest.desc.identity;
-                            let ratchet = event.ratchet;
+                            let _ratchet = event.ratchet;
                             peer_crypto
                                 .lock()
                                 .expect("peer map")
                                 .insert(
                                     peer.clone(),
                                     PeerCrypto {
-                                        identity_hash,
                                         identity,
-                                        public_key,
-                                        ratchet,
                                     },
                                 );
                             eprintln!("[daemon] rx announce peer={}", peer);
