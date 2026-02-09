@@ -24,6 +24,7 @@ use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
 use reticulum_daemon::inbound_delivery::decode_inbound_payload;
 use reticulum_daemon::lxmf_bridge::build_wire_message;
+use reticulum_daemon::announce_names::{normalize_display_name, parse_peer_name_from_app_data};
 use reticulum_daemon::receipt_bridge::{
     handle_receipt_event, track_receipt_mapping, ReceiptBridge,
 };
@@ -49,6 +50,7 @@ struct TransportBridge {
     transport: Arc<Transport>,
     signer: PrivateIdentity,
     announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
+    announce_app_data: Option<Vec<u8>>,
     peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
     receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
@@ -63,6 +65,7 @@ impl TransportBridge {
         transport: Arc<Transport>,
         signer: PrivateIdentity,
         announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
+        announce_app_data: Option<Vec<u8>>,
         peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
         receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
     ) -> Self {
@@ -70,6 +73,7 @@ impl TransportBridge {
             transport,
             signer,
             announce_destination,
+            announce_app_data,
             peer_crypto,
             receipt_map,
         }
@@ -143,8 +147,11 @@ impl AnnounceBridge for TransportBridge {
     fn announce_now(&self) -> Result<(), std::io::Error> {
         let transport = self.transport.clone();
         let destination = self.announce_destination.clone();
+        let app_data = self.announce_app_data.clone();
         tokio::spawn(async move {
-            transport.send_announce(&destination, None).await;
+            transport
+                .send_announce(&destination, app_data.as_deref())
+                .await;
         });
         Ok(())
     }
@@ -176,6 +183,9 @@ async fn main() {
             });
             let identity = load_or_create_identity(&identity_path).expect("load identity");
             let identity_hash = hex::encode(identity.address_hash().as_slice());
+            let local_display_name = std::env::var("LXMF_DISPLAY_NAME")
+                .ok()
+                .and_then(|value| normalize_display_name(&value));
             let daemon_config = args.config.as_ref().and_then(|path| {
                 match DaemonConfig::from_path(path) {
                     Ok(config) => Some(config),
@@ -271,6 +281,9 @@ async fn main() {
                         transport.clone(),
                         identity.clone(),
                         destination.clone(),
+                        local_display_name
+                            .as_ref()
+                            .map(|display_name| display_name.as_bytes().to_vec()),
                         peer_crypto.clone(),
                         receipt_map.clone(),
                     ))
@@ -339,17 +352,30 @@ async fn main() {
                             let dest = event.destination.lock().await;
                             let peer = hex::encode(dest.desc.address_hash.as_slice());
                             let identity = dest.desc.identity;
+                            let (peer_name, peer_name_source) =
+                                parse_peer_name_from_app_data(event.app_data.as_slice())
+                                    .map(|(name, source)| (Some(name), Some(source.to_string())))
+                                    .unwrap_or((None, None));
                             let _ratchet = event.ratchet;
                             peer_crypto
                                 .lock()
                                 .expect("peer map")
                                 .insert(peer.clone(), PeerCrypto { identity });
-                            eprintln!("[daemon] rx announce peer={}", peer);
+                            if let Some(name) = peer_name.as_ref() {
+                                eprintln!("[daemon] rx announce peer={} name={}", peer, name);
+                            } else {
+                                eprintln!("[daemon] rx announce peer={}", peer);
+                            }
                             let timestamp = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map(|value| value.as_secs() as i64)
                                 .unwrap_or(0);
-                            let _ = daemon_announce.accept_announce(peer, timestamp);
+                            let _ = daemon_announce.accept_announce_with_details(
+                                peer,
+                                timestamp,
+                                peer_name,
+                                peer_name_source,
+                            );
                         }
                     }
                 });
