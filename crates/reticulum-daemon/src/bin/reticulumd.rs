@@ -14,7 +14,7 @@ use reticulum::hash::AddressHash;
 use reticulum::identity::{Identity, PrivateIdentity};
 use reticulum::iface::tcp_client::TcpClient;
 use reticulum::iface::tcp_server::TcpServer;
-use reticulum::rpc::{http, AnnounceBridge, OutboundBridge, RpcDaemon};
+use reticulum::rpc::{http, AnnounceBridge, InterfaceRecord, OutboundBridge, RpcDaemon};
 use reticulum::storage::messages::MessagesStore;
 use reticulum::transport::{Transport, TransportConfig};
 use tokio::sync::mpsc::unbounded_channel;
@@ -176,6 +176,31 @@ async fn main() {
             });
             let identity = load_or_create_identity(&identity_path).expect("load identity");
             let identity_hash = hex::encode(identity.address_hash().as_slice());
+            let daemon_config = args.config.as_ref().and_then(|path| {
+                match DaemonConfig::from_path(path) {
+                    Ok(config) => Some(config),
+                    Err(err) => {
+                        eprintln!("[daemon] failed to load config {}: {}", path.display(), err);
+                        None
+                    }
+                }
+            });
+            let mut configured_interfaces = daemon_config
+                .as_ref()
+                .map(|config| {
+                    config
+                        .interfaces
+                        .iter()
+                        .map(|iface| InterfaceRecord {
+                            kind: iface.kind.clone(),
+                            enabled: iface.enabled.unwrap_or(false),
+                            host: iface.host.clone(),
+                            port: iface.port,
+                            name: iface.name.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
 
             let mut transport: Option<Arc<Transport>> = None;
             let peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>> =
@@ -197,27 +222,32 @@ async fn main() {
                     .await;
                 let iface_manager = transport_instance.iface_manager();
                 iface_manager.lock().await.spawn(
-                    TcpServer::new(addr, iface_manager.clone()),
+                    TcpServer::new(addr.clone(), iface_manager.clone()),
                     TcpServer::spawn,
                 );
-                if let Some(config_path) = args.config.as_ref() {
-                    if let Ok(config) = DaemonConfig::from_path(config_path) {
-                        for (host, port) in config.tcp_client_endpoints() {
-                            let addr = format!("{}:{}", host, port);
-                            iface_manager
-                                .lock()
-                                .await
-                                .spawn(TcpClient::new(addr), TcpClient::spawn);
-                            eprintln!(
-                                "[daemon] tcp_client enabled name={} host={} port={}",
-                                host, host, port
-                            );
-                        }
-                    } else {
-                        eprintln!("[daemon] failed to load config: {}", config_path.display());
+                if let Some(config) = daemon_config.as_ref() {
+                    for (host, port) in config.tcp_client_endpoints() {
+                        let addr = format!("{}:{}", host, port);
+                        iface_manager
+                            .lock()
+                            .await
+                            .spawn(TcpClient::new(addr), TcpClient::spawn);
+                        eprintln!(
+                            "[daemon] tcp_client enabled name={} host={} port={}",
+                            host, host, port
+                        );
                     }
                 }
                 eprintln!("[daemon] transport enabled");
+                if let Some((host, port)) = addr.rsplit_once(':') {
+                    configured_interfaces.push(InterfaceRecord {
+                        kind: "tcp_server".into(),
+                        enabled: true,
+                        host: Some(host.to_string()),
+                        port: port.parse::<u16>().ok(),
+                        name: Some("daemon-transport".into()),
+                    });
+                }
 
                 let destination = transport_instance
                     .add_destination(identity.clone(), DestinationName::new("lxmf", "delivery"))
@@ -259,6 +289,8 @@ async fn main() {
                 outbound_bridge,
                 announce_bridge,
             ));
+            daemon.replace_interfaces(configured_interfaces);
+            daemon.set_propagation_state(transport.is_some(), None, 0);
 
             if transport.is_some() {
                 let daemon_receipts = daemon.clone();

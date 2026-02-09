@@ -2,10 +2,11 @@ pub mod codec;
 pub mod http;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value as JsonValue};
+use serde_json::{json, Map as JsonMap, Value as JsonValue};
 
 use crate::storage::messages::{MessageRecord, MessagesStore};
-use std::collections::{HashMap, VecDeque};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::Duration;
@@ -30,12 +31,93 @@ pub struct RpcError {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct InterfaceRecord {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub enabled: bool,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct DeliveryPolicy {
+    pub auth_required: bool,
+    pub allowed_destinations: Vec<String>,
+    pub denied_destinations: Vec<String>,
+    pub ignored_destinations: Vec<String>,
+    pub prioritised_destinations: Vec<String>,
+}
+
+impl Default for DeliveryPolicy {
+    fn default() -> Self {
+        Self {
+            auth_required: false,
+            allowed_destinations: Vec::new(),
+            denied_destinations: Vec::new(),
+            ignored_destinations: Vec::new(),
+            prioritised_destinations: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct PropagationState {
+    pub enabled: bool,
+    pub store_root: Option<String>,
+    pub target_cost: u32,
+    pub total_ingested: usize,
+    pub last_ingest_count: usize,
+}
+
+impl Default for PropagationState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            store_root: None,
+            target_cost: 0,
+            total_ingested: 0,
+            last_ingest_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct StampPolicy {
+    pub target_cost: u32,
+    pub flexibility: u32,
+}
+
+impl Default for StampPolicy {
+    fn default() -> Self {
+        Self {
+            target_cost: 0,
+            flexibility: 0,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TicketRecord {
+    pub destination: String,
+    pub ticket: String,
+    pub expires_at: i64,
+}
+
 pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
     events: broadcast::Sender<RpcEvent>,
     event_queue: Mutex<VecDeque<RpcEvent>>,
     peers: Mutex<HashMap<String, PeerRecord>>,
+    interfaces: Mutex<Vec<InterfaceRecord>>,
+    delivery_policy: Mutex<DeliveryPolicy>,
+    propagation_state: Mutex<PropagationState>,
+    propagation_payloads: Mutex<HashMap<String, String>>,
+    paper_ingest_seen: Mutex<HashSet<String>>,
+    stamp_policy: Mutex<StampPolicy>,
+    ticket_cache: Mutex<HashMap<String, TicketRecord>>,
     outbound_bridge: Option<Arc<dyn OutboundBridge>>,
     announce_bridge: Option<Arc<dyn AnnounceBridge>>,
 }
@@ -72,6 +154,23 @@ struct SendMessageParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct SendMessageV2Params {
+    id: String,
+    source: String,
+    destination: String,
+    #[serde(default)]
+    title: String,
+    content: String,
+    fields: Option<JsonValue>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    stamp_cost: Option<u32>,
+    #[serde(default)]
+    include_ticket: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RecordReceiptParams {
     message_id: String,
     status: String,
@@ -83,6 +182,72 @@ struct AnnounceReceivedParams {
     timestamp: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SetInterfacesParams {
+    interfaces: Vec<InterfaceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerOpParams {
+    peer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeliveryPolicyParams {
+    #[serde(default)]
+    auth_required: Option<bool>,
+    #[serde(default)]
+    allowed_destinations: Option<Vec<String>>,
+    #[serde(default)]
+    denied_destinations: Option<Vec<String>>,
+    #[serde(default)]
+    ignored_destinations: Option<Vec<String>>,
+    #[serde(default)]
+    prioritised_destinations: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PropagationEnableParams {
+    enabled: bool,
+    #[serde(default)]
+    store_root: Option<String>,
+    #[serde(default)]
+    target_cost: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PropagationIngestParams {
+    #[serde(default)]
+    transient_id: Option<String>,
+    #[serde(default)]
+    payload_hex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PropagationFetchParams {
+    transient_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaperIngestUriParams {
+    uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StampPolicySetParams {
+    #[serde(default)]
+    target_cost: Option<u32>,
+    #[serde(default)]
+    flexibility: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TicketGenerateParams {
+    destination: String,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
 impl RpcDaemon {
     pub fn with_store(store: MessagesStore, identity_hash: String) -> Self {
         let (events, _rx) = broadcast::channel(64);
@@ -92,6 +257,13 @@ impl RpcDaemon {
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
+            interfaces: Mutex::new(Vec::new()),
+            delivery_policy: Mutex::new(DeliveryPolicy::default()),
+            propagation_state: Mutex::new(PropagationState::default()),
+            propagation_payloads: Mutex::new(HashMap::new()),
+            paper_ingest_seen: Mutex::new(HashSet::new()),
+            stamp_policy: Mutex::new(StampPolicy::default()),
+            ticket_cache: Mutex::new(HashMap::new()),
             outbound_bridge: None,
             announce_bridge: None,
         }
@@ -109,6 +281,13 @@ impl RpcDaemon {
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
+            interfaces: Mutex::new(Vec::new()),
+            delivery_policy: Mutex::new(DeliveryPolicy::default()),
+            propagation_state: Mutex::new(PropagationState::default()),
+            propagation_payloads: Mutex::new(HashMap::new()),
+            paper_ingest_seen: Mutex::new(HashSet::new()),
+            stamp_policy: Mutex::new(StampPolicy::default()),
+            ticket_cache: Mutex::new(HashMap::new()),
             outbound_bridge: Some(outbound_bridge),
             announce_bridge: None,
         }
@@ -127,6 +306,13 @@ impl RpcDaemon {
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
+            interfaces: Mutex::new(Vec::new()),
+            delivery_policy: Mutex::new(DeliveryPolicy::default()),
+            propagation_state: Mutex::new(PropagationState::default()),
+            propagation_payloads: Mutex::new(HashMap::new()),
+            paper_ingest_seen: Mutex::new(HashSet::new()),
+            stamp_policy: Mutex::new(StampPolicy::default()),
+            ticket_cache: Mutex::new(HashMap::new()),
             outbound_bridge,
             announce_bridge,
         }
@@ -141,6 +327,26 @@ impl RpcDaemon {
     pub fn test_instance_with_identity(identity: impl Into<String>) -> Self {
         let store = MessagesStore::in_memory().expect("in-memory store");
         Self::with_store(store, identity.into())
+    }
+
+    pub fn replace_interfaces(&self, interfaces: Vec<InterfaceRecord>) {
+        let mut guard = self.interfaces.lock().expect("interfaces mutex poisoned");
+        *guard = interfaces;
+    }
+
+    pub fn set_propagation_state(
+        &self,
+        enabled: bool,
+        store_root: Option<String>,
+        target_cost: u32,
+    ) {
+        let mut guard = self
+            .propagation_state
+            .lock()
+            .expect("propagation mutex poisoned");
+        guard.enabled = enabled;
+        guard.store_root = store_root;
+        guard.target_cost = target_cost;
     }
 
     fn store_inbound_record(&self, record: MessageRecord) -> Result<(), std::io::Error> {
@@ -196,6 +402,51 @@ impl RpcDaemon {
                 })),
                 error: None,
             }),
+            "daemon_status_ex" => {
+                let peer_count = self.peers.lock().expect("peers mutex poisoned").len();
+                let interfaces = self
+                    .interfaces
+                    .lock()
+                    .expect("interfaces mutex poisoned")
+                    .clone();
+                let message_count = self
+                    .store
+                    .list_messages(10_000, None)
+                    .map_err(std::io::Error::other)?
+                    .len();
+                let delivery_policy = self
+                    .delivery_policy
+                    .lock()
+                    .expect("policy mutex poisoned")
+                    .clone();
+                let propagation = self
+                    .propagation_state
+                    .lock()
+                    .expect("propagation mutex poisoned")
+                    .clone();
+                let stamp_policy = self
+                    .stamp_policy
+                    .lock()
+                    .expect("stamp mutex poisoned")
+                    .clone();
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "identity_hash": self.identity_hash,
+                        "running": true,
+                        "peer_count": peer_count,
+                        "message_count": message_count,
+                        "interface_count": interfaces.len(),
+                        "interfaces": interfaces,
+                        "delivery_policy": delivery_policy,
+                        "propagation": propagation,
+                        "stamp_policy": stamp_policy,
+                        "capabilities": Self::capabilities(),
+                    })),
+                    error: None,
+                })
+            }
             "list_messages" => {
                 let items = self
                     .store
@@ -221,46 +472,169 @@ impl RpcDaemon {
                     error: None,
                 })
             }
+            "list_interfaces" => {
+                let interfaces = self
+                    .interfaces
+                    .lock()
+                    .expect("interfaces mutex poisoned")
+                    .clone();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "interfaces": interfaces })),
+                    error: None,
+                })
+            }
+            "set_interfaces" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: SetInterfacesParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                for iface in &parsed.interfaces {
+                    if iface.kind.trim().is_empty() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "interface type is required",
+                        ));
+                    }
+                    if iface.kind == "tcp_client" && (iface.host.is_none() || iface.port.is_none()) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "tcp_client requires host and port",
+                        ));
+                    }
+                    if iface.kind == "tcp_server" && iface.port.is_none() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "tcp_server requires port",
+                        ));
+                    }
+                }
+
+                {
+                    let mut guard = self.interfaces.lock().expect("interfaces mutex poisoned");
+                    *guard = parsed.interfaces.clone();
+                }
+
+                let event = RpcEvent {
+                    event_type: "interfaces_updated".into(),
+                    payload: json!({ "interfaces": parsed.interfaces }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "updated": true })),
+                    error: None,
+                })
+            }
+            "reload_config" => {
+                let timestamp = now_i64();
+                let event = RpcEvent {
+                    event_type: "config_reloaded".into(),
+                    payload: json!({ "timestamp": timestamp }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "reloaded": true, "timestamp": timestamp })),
+                    error: None,
+                })
+            }
+            "peer_sync" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: PeerOpParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let timestamp = now_i64();
+                let record = PeerRecord {
+                    peer: parsed.peer,
+                    last_seen: timestamp,
+                };
+                {
+                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
+                    guard.insert(record.peer.clone(), record.clone());
+                }
+                let event = RpcEvent {
+                    event_type: "peer_sync".into(),
+                    payload: json!({ "peer": record.peer, "timestamp": timestamp }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "peer": record.peer, "synced": true })),
+                    error: None,
+                })
+            }
+            "peer_unpeer" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: PeerOpParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let removed = {
+                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
+                    guard.remove(&parsed.peer).is_some()
+                };
+                let event = RpcEvent {
+                    event_type: "peer_unpeer".into(),
+                    payload: json!({ "peer": parsed.peer, "removed": removed }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "removed": removed })),
+                    error: None,
+                })
+            }
             "send_message" => {
                 let params = request.params.ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
                 })?;
                 let parsed: SendMessageParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as i64)
-                    .unwrap_or(0);
-                let record = MessageRecord {
-                    id: parsed.id.clone(),
-                    source: parsed.source,
-                    destination: parsed.destination,
-                    title: parsed.title,
-                    content: parsed.content,
-                    timestamp,
-                    direction: "out".into(),
-                    fields: parsed.fields,
-                    receipt_status: None,
-                };
-                self.store
-                    .insert_message(&record)
-                    .map_err(std::io::Error::other)?;
-                if let Some(bridge) = &self.outbound_bridge {
-                    let _ = bridge.deliver(&record);
-                } else {
-                    let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
-                }
-                let event = RpcEvent {
-                    event_type: "outbound".into(),
-                    payload: json!({ "message": record }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "message_id": record.id })),
-                    error: None,
-                })
+
+                self.store_outbound(
+                    request.id,
+                    parsed.id,
+                    parsed.source,
+                    parsed.destination,
+                    parsed.title,
+                    parsed.content,
+                    parsed.fields,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            "send_message_v2" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: SendMessageV2Params = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                self.store_outbound(
+                    request.id,
+                    parsed.id,
+                    parsed.source,
+                    parsed.destination,
+                    parsed.title,
+                    parsed.content,
+                    parsed.fields,
+                    parsed.method,
+                    parsed.stamp_cost,
+                    parsed.include_ticket,
+                )
             }
             "receive_message" => {
                 let params = request.params.ok_or_else(|| {
@@ -268,10 +642,7 @@ impl RpcDaemon {
                 })?;
                 let parsed: SendMessageParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as i64)
-                    .unwrap_or(0);
+                let timestamp = now_i64();
                 let record = MessageRecord {
                     id: parsed.id.clone(),
                     source: parsed.source,
@@ -313,11 +684,284 @@ impl RpcDaemon {
                     error: None,
                 })
             }
+            "get_delivery_policy" => {
+                let policy = self
+                    .delivery_policy
+                    .lock()
+                    .expect("policy mutex poisoned")
+                    .clone();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "policy": policy })),
+                    error: None,
+                })
+            }
+            "set_delivery_policy" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: DeliveryPolicyParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let policy = {
+                    let mut guard = self
+                        .delivery_policy
+                        .lock()
+                        .expect("policy mutex poisoned");
+                    if let Some(value) = parsed.auth_required {
+                        guard.auth_required = value;
+                    }
+                    if let Some(value) = parsed.allowed_destinations {
+                        guard.allowed_destinations = value;
+                    }
+                    if let Some(value) = parsed.denied_destinations {
+                        guard.denied_destinations = value;
+                    }
+                    if let Some(value) = parsed.ignored_destinations {
+                        guard.ignored_destinations = value;
+                    }
+                    if let Some(value) = parsed.prioritised_destinations {
+                        guard.prioritised_destinations = value;
+                    }
+                    guard.clone()
+                };
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "policy": policy })),
+                    error: None,
+                })
+            }
+            "propagation_status" => {
+                let state = self
+                    .propagation_state
+                    .lock()
+                    .expect("propagation mutex poisoned")
+                    .clone();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "propagation": state })),
+                    error: None,
+                })
+            }
+            "propagation_enable" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: PropagationEnableParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let state = {
+                    let mut guard = self
+                        .propagation_state
+                        .lock()
+                        .expect("propagation mutex poisoned");
+                    guard.enabled = parsed.enabled;
+                    if parsed.store_root.is_some() {
+                        guard.store_root = parsed.store_root;
+                    }
+                    if let Some(cost) = parsed.target_cost {
+                        guard.target_cost = cost;
+                    }
+                    guard.clone()
+                };
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "propagation": state })),
+                    error: None,
+                })
+            }
+            "propagation_ingest" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: PropagationIngestParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let payload_hex = parsed.payload_hex.unwrap_or_default();
+                let transient_id = parsed.transient_id.unwrap_or_else(|| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(payload_hex.as_bytes());
+                    encode_hex(hasher.finalize())
+                });
+
+                if !payload_hex.is_empty() {
+                    self.propagation_payloads
+                        .lock()
+                        .expect("propagation payload mutex poisoned")
+                        .insert(transient_id.clone(), payload_hex);
+                }
+
+                let state = {
+                    let mut guard = self
+                        .propagation_state
+                        .lock()
+                        .expect("propagation mutex poisoned");
+                    let ingested_count = usize::from(!transient_id.is_empty());
+                    guard.last_ingest_count = ingested_count;
+                    guard.total_ingested += ingested_count;
+                    guard.clone()
+                };
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "ingested_count": state.last_ingest_count,
+                        "transient_id": transient_id,
+                    })),
+                    error: None,
+                })
+            }
+            "propagation_fetch" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: PropagationFetchParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let payload = self
+                    .propagation_payloads
+                    .lock()
+                    .expect("propagation payload mutex poisoned")
+                    .get(&parsed.transient_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        std::io::Error::new(std::io::ErrorKind::NotFound, "transient_id not found")
+                    })?;
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "transient_id": parsed.transient_id,
+                        "payload_hex": payload,
+                    })),
+                    error: None,
+                })
+            }
+            "paper_ingest_uri" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: PaperIngestUriParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                if !parsed.uri.starts_with("lxm://") {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "paper URI must start with lxm://",
+                    ));
+                }
+
+                let transient_id = {
+                    let mut hasher = Sha256::new();
+                    hasher.update(parsed.uri.as_bytes());
+                    encode_hex(hasher.finalize())
+                };
+
+                let duplicate = {
+                    let mut guard = self
+                        .paper_ingest_seen
+                        .lock()
+                        .expect("paper ingest mutex poisoned");
+                    if guard.contains(&transient_id) {
+                        true
+                    } else {
+                        guard.insert(transient_id.clone());
+                        false
+                    }
+                };
+
+                let body = parsed.uri.trim_start_matches("lxm://");
+                let destination = if body.len() >= 32 {
+                    body[..32].to_string()
+                } else {
+                    "".to_string()
+                };
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "destination": destination,
+                        "transient_id": transient_id,
+                        "duplicate": duplicate,
+                        "bytes_len": parsed.uri.len(),
+                    })),
+                    error: None,
+                })
+            }
+            "stamp_policy_get" => {
+                let policy = self
+                    .stamp_policy
+                    .lock()
+                    .expect("stamp mutex poisoned")
+                    .clone();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "stamp_policy": policy })),
+                    error: None,
+                })
+            }
+            "stamp_policy_set" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: StampPolicySetParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let policy = {
+                    let mut guard = self.stamp_policy.lock().expect("stamp mutex poisoned");
+                    if let Some(value) = parsed.target_cost {
+                        guard.target_cost = value;
+                    }
+                    if let Some(value) = parsed.flexibility {
+                        guard.flexibility = value;
+                    }
+                    guard.clone()
+                };
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({ "stamp_policy": policy })),
+                    error: None,
+                })
+            }
+            "ticket_generate" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: TicketGenerateParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+
+                let ttl = parsed.ttl_secs.unwrap_or(3600) as i64;
+                let now = now_i64();
+                let mut hasher = Sha256::new();
+                hasher.update(parsed.destination.as_bytes());
+                hasher.update(now.to_be_bytes());
+                let ticket = encode_hex(hasher.finalize());
+                let record = TicketRecord {
+                    destination: parsed.destination.clone(),
+                    ticket: ticket.clone(),
+                    expires_at: now + ttl,
+                };
+
+                self.ticket_cache
+                    .lock()
+                    .expect("ticket mutex poisoned")
+                    .insert(parsed.destination, record.clone());
+
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "ticket": record.ticket,
+                        "destination": record.destination,
+                        "expires_at": record.expires_at,
+                        "ttl_secs": ttl,
+                    })),
+                    error: None,
+                })
+            }
             "announce_now" => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as i64)
-                    .unwrap_or(0);
+                let timestamp = now_i64();
                 if let Some(bridge) = &self.announce_bridge {
                     let _ = bridge.announce_now();
                 }
@@ -339,12 +983,7 @@ impl RpcDaemon {
                 })?;
                 let parsed: AnnounceReceivedParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                let timestamp = parsed.timestamp.unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|value| value.as_secs() as i64)
-                        .unwrap_or(0)
-                });
+                let timestamp = parsed.timestamp.unwrap_or_else(now_i64);
                 let record = PeerRecord {
                     peer: parsed.peer,
                     last_seen: timestamp,
@@ -412,6 +1051,81 @@ impl RpcDaemon {
         }
     }
 
+    fn store_outbound(
+        &self,
+        request_id: u64,
+        id: String,
+        source: String,
+        destination: String,
+        title: String,
+        content: String,
+        fields: Option<JsonValue>,
+        method: Option<String>,
+        stamp_cost: Option<u32>,
+        include_ticket: Option<bool>,
+    ) -> Result<RpcResponse, std::io::Error> {
+        let timestamp = now_i64();
+        let record = MessageRecord {
+            id: id.clone(),
+            source,
+            destination,
+            title,
+            content,
+            timestamp,
+            direction: "out".into(),
+            fields: merge_fields_with_options(fields, method.clone(), stamp_cost, include_ticket),
+            receipt_status: None,
+        };
+
+        self.store
+            .insert_message(&record)
+            .map_err(std::io::Error::other)?;
+        if let Some(bridge) = &self.outbound_bridge {
+            let _ = bridge.deliver(&record);
+        } else {
+            let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
+        }
+        let event = RpcEvent {
+            event_type: "outbound".into(),
+            payload: json!({ "message": record, "method": method }),
+        };
+        self.push_event(event.clone());
+        let _ = self.events.send(event);
+
+        Ok(RpcResponse {
+            id: request_id,
+            result: Some(json!({ "message_id": id })),
+            error: None,
+        })
+    }
+
+    fn capabilities() -> Vec<&'static str> {
+        vec![
+            "status",
+            "daemon_status_ex",
+            "list_messages",
+            "list_peers",
+            "send_message",
+            "send_message_v2",
+            "announce_now",
+            "list_interfaces",
+            "set_interfaces",
+            "reload_config",
+            "peer_sync",
+            "peer_unpeer",
+            "set_delivery_policy",
+            "get_delivery_policy",
+            "propagation_status",
+            "propagation_enable",
+            "propagation_ingest",
+            "propagation_fetch",
+            "paper_ingest_uri",
+            "stamp_policy_get",
+            "stamp_policy_set",
+            "ticket_generate",
+        ]
+    }
+
     pub fn handle_framed_request(&self, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         let request: RpcRequest = codec::decode_frame(bytes)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
@@ -437,10 +1151,7 @@ impl RpcDaemon {
     }
 
     pub fn schedule_announce_for_test(&self, id: u64) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs() as i64)
-            .unwrap_or(0);
+        let timestamp = now_i64();
         let event = RpcEvent {
             event_type: "announce_sent".into(),
             payload: json!({ "timestamp": timestamp, "announce_id": id }),
@@ -468,10 +1179,7 @@ impl RpcDaemon {
     }
 
     pub fn inject_inbound_test_message(&self, content: &str) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs() as i64)
-            .unwrap_or(0);
+        let timestamp = now_i64();
         let record = crate::storage::messages::MessageRecord {
             id: format!("test-{}", timestamp),
             source: "test-peer".into(),
@@ -500,6 +1208,60 @@ impl RpcDaemon {
         self.push_event(event.clone());
         let _ = self.events.send(event);
     }
+}
+
+fn merge_fields_with_options(
+    fields: Option<JsonValue>,
+    method: Option<String>,
+    stamp_cost: Option<u32>,
+    include_ticket: Option<bool>,
+) -> Option<JsonValue> {
+    let has_options = method.is_some() || stamp_cost.is_some() || include_ticket.is_some();
+    if !has_options {
+        return fields;
+    }
+
+    let mut root = match fields {
+        Some(JsonValue::Object(map)) => map,
+        Some(other) => {
+            let mut map = JsonMap::new();
+            map.insert("_fields_raw".into(), other);
+            map
+        }
+        None => JsonMap::new(),
+    };
+
+    let mut lxmf = JsonMap::new();
+    if let Some(value) = method {
+        lxmf.insert("method".into(), JsonValue::String(value));
+    }
+    if let Some(value) = stamp_cost {
+        lxmf.insert("stamp_cost".into(), json!(value));
+    }
+    if let Some(value) = include_ticket {
+        lxmf.insert("include_ticket".into(), json!(value));
+    }
+
+    root.insert("_lxmf".into(), JsonValue::Object(lxmf));
+    Some(JsonValue::Object(root))
+}
+
+fn now_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn encode_hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 pub fn handle_framed_request(daemon: &RpcDaemon, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
