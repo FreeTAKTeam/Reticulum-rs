@@ -24,7 +24,9 @@ use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
 use reticulum_daemon::inbound_delivery::decode_inbound_payload;
 use reticulum_daemon::lxmf_bridge::build_wire_message;
-use reticulum_daemon::announce_names::{normalize_display_name, parse_peer_name_from_app_data};
+use reticulum_daemon::announce_names::{
+    encode_delivery_display_name_app_data, normalize_display_name, parse_peer_name_from_app_data,
+};
 use reticulum_daemon::receipt_bridge::{
     handle_receipt_event, track_receipt_mapping, ReceiptBridge,
 };
@@ -283,7 +285,9 @@ async fn main() {
                         destination.clone(),
                         local_display_name
                             .as_ref()
-                            .map(|display_name| display_name.as_bytes().to_vec()),
+                            .and_then(|display_name| {
+                                encode_delivery_display_name_app_data(display_name)
+                            }),
                         peer_crypto.clone(),
                         receipt_map.clone(),
                     ))
@@ -304,6 +308,11 @@ async fn main() {
             ));
             daemon.replace_interfaces(configured_interfaces);
             daemon.set_propagation_state(transport.is_some(), None, 0);
+
+            // Make the local delivery destination visible on startup.
+            if let Some(bridge) = bridge.as_ref() {
+                let _ = bridge.announce_now();
+            }
 
             if transport.is_some() {
                 let daemon_receipts = daemon.clone();

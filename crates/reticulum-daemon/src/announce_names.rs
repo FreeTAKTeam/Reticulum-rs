@@ -1,5 +1,14 @@
 const MAX_DISPLAY_NAME_CHARS: usize = 64;
 
+pub fn encode_delivery_display_name_app_data(display_name: &str) -> Option<Vec<u8>> {
+    let normalized = normalize_display_name(display_name)?;
+    let peer_data = rmpv::Value::Array(vec![
+        rmpv::Value::Binary(normalized.into_bytes()),
+        rmpv::Value::Nil,
+    ]);
+    rmp_serde::to_vec(&peer_data).ok()
+}
+
 pub fn normalize_display_name(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

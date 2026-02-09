@@ -1225,15 +1225,30 @@ impl RpcDaemon {
         interval_secs: u64,
     ) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn_local(async move {
+            if interval_secs == 0 {
+                return;
+            }
+
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-            interval.tick().await;
             loop {
+                // First tick is immediate, so we announce once at scheduler start.
                 interval.tick().await;
                 let id = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|value| value.as_secs())
                     .unwrap_or(0);
-                self.schedule_announce_for_test(id);
+
+                if let Some(bridge) = &self.announce_bridge {
+                    let _ = bridge.announce_now();
+                }
+
+                let timestamp = now_i64();
+                let event = RpcEvent {
+                    event_type: "announce_sent".into(),
+                    payload: json!({ "timestamp": timestamp, "announce_id": id }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
             }
         })
     }

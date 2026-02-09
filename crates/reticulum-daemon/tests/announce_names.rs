@@ -1,5 +1,7 @@
 use lxmf::Router;
-use reticulum_daemon::announce_names::{normalize_display_name, parse_peer_name_from_app_data};
+use reticulum_daemon::announce_names::{
+    encode_delivery_display_name_app_data, normalize_display_name, parse_peer_name_from_app_data,
+};
 use rmpv::Value;
 
 #[test]
@@ -49,4 +51,12 @@ fn normalize_display_name_trims_and_caps_length() {
 fn normalize_display_name_rejects_control_chars() {
     assert!(normalize_display_name("Alice\nBob").is_none());
     assert!(normalize_display_name("   ").is_none());
+}
+
+#[test]
+fn encode_delivery_display_name_round_trips() {
+    let app_data = encode_delivery_display_name_app_data("Alice Router").expect("encoded");
+    let parsed = parse_peer_name_from_app_data(&app_data).expect("parsed");
+    assert_eq!(parsed.0, "Alice Router");
+    assert_eq!(parsed.1, "delivery_app_data");
 }
