@@ -310,7 +310,6 @@ struct ResourceSender {
     expected_proof: Hash,
     data_size: u64,
     has_metadata: bool,
-    metadata: Option<Vec<u8>>,
     status: ResourceStatus,
 }
 
@@ -372,7 +371,6 @@ impl ResourceSender {
             expected_proof,
             data_size,
             has_metadata,
-            metadata,
             status: ResourceStatus::Advertised,
         })
     }

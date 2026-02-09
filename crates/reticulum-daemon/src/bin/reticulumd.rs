@@ -26,7 +26,6 @@ use reticulum_daemon::inbound_delivery::decode_inbound_payload;
 use reticulum_daemon::lxmf_bridge::build_wire_message;
 use reticulum_daemon::receipt_bridge::{handle_receipt_event, track_receipt_mapping, ReceiptBridge};
 use reticulum_daemon::rns_crypto::decrypt_with_identity;
-use lxmf::constants::DESTINATION_LENGTH;
 
 #[derive(Parser, Debug)]
 #[command(name = "reticulumd")]
@@ -55,10 +54,7 @@ struct TransportBridge {
 
 #[derive(Clone, Copy)]
 struct PeerCrypto {
-    identity_hash: [u8; 16],
     identity: Identity,
-    public_key: [u8; 32],
-    ratchet: Option<[u8; 32]>,
 }
 
 impl TransportBridge {
@@ -324,21 +320,15 @@ async fn main() {
                         if let Ok(event) = rx.recv().await {
                             let dest = event.destination.lock().await;
                             let peer = hex::encode(dest.desc.address_hash.as_slice());
-                            let public_key = *dest.desc.identity.public_key.as_bytes();
-                            let mut identity_hash = [0u8; 16];
-                            identity_hash.copy_from_slice(dest.desc.identity.address_hash.as_slice());
                             let identity = dest.desc.identity;
-                            let ratchet = event.ratchet;
+                            let _ratchet = event.ratchet;
                             peer_crypto
                                 .lock()
                                 .expect("peer map")
                                 .insert(
                                     peer.clone(),
                                     PeerCrypto {
-                                        identity_hash,
                                         identity,
-                                        public_key,
-                                        ratchet,
                                     },
                                 );
                             eprintln!("[daemon] rx announce peer={}", peer);
