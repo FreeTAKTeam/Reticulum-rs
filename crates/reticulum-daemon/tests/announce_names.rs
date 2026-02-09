@@ -1,5 +1,6 @@
 use lxmf::Router;
 use reticulum_daemon::announce_names::{normalize_display_name, parse_peer_name_from_app_data};
+use rmpv::Value;
 
 #[test]
 fn parse_peer_name_prefers_pn_metadata() {
@@ -17,6 +18,18 @@ fn parse_peer_name_falls_back_to_utf8_payload() {
     let parsed = parse_peer_name_from_app_data(b"  Bob UTF8  ").expect("name from utf8");
     assert_eq!(parsed.0, "Bob UTF8");
     assert_eq!(parsed.1, "app_data_utf8");
+}
+
+#[test]
+fn parse_peer_name_reads_delivery_msgpack_app_data() {
+    let app_data = rmp_serde::to_vec(&Value::Array(vec![
+        Value::Binary(b"Alice Delivery".to_vec()),
+        Value::from(9),
+    ]))
+    .expect("pack delivery app data");
+    let parsed = parse_peer_name_from_app_data(&app_data).expect("name from delivery app data");
+    assert_eq!(parsed.0, "Alice Delivery");
+    assert_eq!(parsed.1, "delivery_app_data");
 }
 
 #[test]
