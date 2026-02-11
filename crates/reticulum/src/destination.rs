@@ -14,7 +14,7 @@ use crate::{
     hash::{AddressHash, Hash},
     identity::{EmptyIdentity, HashIdentity, Identity, PrivateIdentity, PUBLIC_KEY_LENGTH},
     packet::{
-        self, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+        self, ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
         PacketDataBuffer, PacketType, PropagationType,
     },
     ratchets::{decrypt_with_private_key, now_secs},
@@ -313,39 +313,37 @@ impl DestinationAnnounce {
             );
         }
 
-        let verify_announce =
-            |ratchet: Option<&[u8]>, signature: &[u8], app_data: &[u8]| -> Result<(), RnsError> {
-                // Keeping signed data on stack is only option for now.
-                // Verification function doesn't support prehashed message.
-                let mut signed_data = PacketDataBuffer::new();
-                signed_data
-                    .chain_write(destination.as_slice())?
-                    .chain_write(public_key.as_bytes())?
-                    .chain_write(verifying_key.as_bytes())?
-                    .chain_write(name_hash)?
-                    .chain_write(rand_hash)?;
-                if let Some(ratchet) = ratchet {
-                    signed_data.chain_write(ratchet)?;
-                }
-                if !app_data.is_empty() {
-                    signed_data.chain_write(app_data)?;
-                }
-                let signature =
-                    Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
-                identity
-                    .verify(signed_data.as_slice(), &signature)
-                    .map_err(|_| RnsError::IncorrectSignature)
-            };
+        let verify_announce = |ratchet: Option<&[u8]>,
+                               signature: &[u8],
+                               app_data: &[u8]|
+         -> Result<(), RnsError> {
+            // Keeping signed data on stack is only option for now.
+            // Verification function doesn't support prehashed message.
+            let mut signed_data = PacketDataBuffer::new();
+            signed_data
+                .chain_write(destination.as_slice())?
+                .chain_write(public_key.as_bytes())?
+                .chain_write(verifying_key.as_bytes())?
+                .chain_write(name_hash)?
+                .chain_write(rand_hash)?;
+            if let Some(ratchet) = ratchet {
+                signed_data.chain_write(ratchet)?;
+            }
+            if !app_data.is_empty() {
+                signed_data.chain_write(app_data)?;
+            }
+            let signature = Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+            identity
+                .verify(signed_data.as_slice(), &signature)
+                .map_err(|_| RnsError::IncorrectSignature)
+        };
 
         let remaining = announce_data.len().saturating_sub(offset);
         if remaining < SIGNATURE_LENGTH {
             return Err(RnsError::OutOfMemory);
         }
 
-        let has_ratchet_flag = matches!(
-            packet.header.propagation_type,
-            PropagationType::Reserved1 | PropagationType::Reserved2
-        );
+        let has_ratchet_flag = packet.header.context_flag == ContextFlag::Set;
 
         let parse_with_ratchet = || -> Result<AnnounceInfo<'_>, RnsError> {
             if remaining < SIGNATURE_LENGTH + RATCHET_LENGTH {
@@ -558,7 +556,7 @@ impl Destination<PrivateIdentity, Input, Single> {
         }
 
         if let Some(data) = app_data {
-            packet_data.write(data)?;
+            packet_data.chain_safe_write(data);
         }
 
         let signature = self.identity.sign(packet_data.as_slice());
@@ -581,18 +579,16 @@ impl Destination<PrivateIdentity, Input, Single> {
             packet_data.write(data)?;
         }
 
-        let propagation_type = if ratchet.is_some() {
-            // Encode the ratchet context flag (bit 5) for Python compatibility.
-            PropagationType::Reserved1
-        } else {
-            PropagationType::Broadcast
-        };
-
         Ok(Packet {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
-                propagation_type,
+                context_flag: if ratchet.is_some() {
+                    ContextFlag::Set
+                } else {
+                    ContextFlag::Unset
+                },
+                propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Announce,
                 hops: 0,
@@ -736,6 +732,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::buffer::OutputBuffer;
+    use crate::error::RnsError;
     use crate::hash::Hash;
     use crate::identity::PrivateIdentity;
     use crate::serde::Serialize;
@@ -822,6 +819,34 @@ mod tests {
             .expect("valid announce packet");
 
         DestinationAnnounce::validate(&announce).expect("valid announce");
+    }
+
+    #[test]
+    fn announce_signature_covers_app_data() {
+        let priv_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut destination = SingleInputDestination::new(
+            priv_identity,
+            DestinationName::new("example_utilities", "announcesample.fruits"),
+        );
+
+        let app_data = b"Rust announce app-data";
+        let announce = destination
+            .announce(OsRng, Some(app_data))
+            .expect("valid announce packet");
+
+        let mut tampered = announce;
+        let payload = tampered.data.as_mut_slice();
+        let app_data_offset = 32 + 32 + 10 + 10 + 64;
+        assert!(
+            payload.len() > app_data_offset,
+            "announce must include app_data"
+        );
+        payload[app_data_offset] ^= 0x01;
+
+        match DestinationAnnounce::validate(&tampered) {
+            Ok(_) => panic!("tampered app_data should fail signature verification"),
+            Err(err) => assert!(matches!(err, RnsError::IncorrectSignature)),
+        }
     }
 
     #[test]

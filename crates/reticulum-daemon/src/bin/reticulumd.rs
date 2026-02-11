@@ -14,21 +14,25 @@ use reticulum::hash::AddressHash;
 use reticulum::identity::{Identity, PrivateIdentity};
 use reticulum::iface::tcp_client::TcpClient;
 use reticulum::iface::tcp_server::TcpServer;
+use reticulum::packet::{
+    ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+    PacketDataBuffer, PacketType, PropagationType,
+};
 use reticulum::rpc::{http, AnnounceBridge, InterfaceRecord, OutboundBridge, RpcDaemon};
 use reticulum::storage::messages::MessagesStore;
-use reticulum::transport::{Transport, TransportConfig};
+use reticulum::transport::{SendPacketOutcome, SendPacketTrace, Transport, TransportConfig};
 use tokio::sync::mpsc::unbounded_channel;
 
+use reticulum_daemon::announce_names::{
+    encode_delivery_display_name_app_data, normalize_display_name, parse_peer_name_from_app_data,
+};
 use reticulum_daemon::config::DaemonConfig;
 use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
 use reticulum_daemon::inbound_delivery::decode_inbound_payload;
 use reticulum_daemon::lxmf_bridge::build_wire_message;
-use reticulum_daemon::announce_names::{
-    encode_delivery_display_name_app_data, normalize_display_name, parse_peer_name_from_app_data,
-};
 use reticulum_daemon::receipt_bridge::{
-    handle_receipt_event, track_receipt_mapping, ReceiptBridge,
+    handle_receipt_event, track_receipt_mapping, ReceiptBridge, ReceiptEvent,
 };
 
 #[derive(Parser, Debug)]
@@ -51,10 +55,12 @@ struct Args {
 struct TransportBridge {
     transport: Arc<Transport>,
     signer: PrivateIdentity,
+    delivery_source_hash: [u8; 16],
     announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
     announce_app_data: Option<Vec<u8>>,
     peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
     receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    receipt_tx: tokio::sync::mpsc::UnboundedSender<ReceiptEvent>,
 }
 
 #[derive(Clone, Copy)]
@@ -66,18 +72,22 @@ impl TransportBridge {
     fn new(
         transport: Arc<Transport>,
         signer: PrivateIdentity,
+        delivery_source_hash: [u8; 16],
         announce_destination: Arc<tokio::sync::Mutex<SingleInputDestination>>,
         announce_app_data: Option<Vec<u8>>,
         peer_crypto: Arc<std::sync::Mutex<HashMap<String, PeerCrypto>>>,
         receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
+        receipt_tx: tokio::sync::mpsc::UnboundedSender<ReceiptEvent>,
     ) -> Self {
         Self {
             transport,
             signer,
+            delivery_source_hash,
             announce_destination,
             announce_app_data,
             peer_crypto,
             receipt_map,
+            receipt_tx,
         }
     }
 }
@@ -97,19 +107,10 @@ impl OutboundBridge for TransportBridge {
             .expect("peer map")
             .get(&record.destination)
             .copied();
-        let Some(peer_info) = peer_info else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "peer not announced",
-            ));
-        };
-
-        let source_hash = self.signer.address_hash();
-        let mut source = [0u8; 16];
-        source.copy_from_slice(source_hash.as_slice());
+        let peer_identity = peer_info.map(|info| info.identity);
 
         let wire = build_wire_message(
-            source,
+            self.delivery_source_hash,
             destination,
             &record.title,
             &record.content,
@@ -120,15 +121,57 @@ impl OutboundBridge for TransportBridge {
 
         let payload = wire;
 
-        let destination_desc = reticulum::destination::DestinationDesc {
-            identity: peer_info.identity,
-            address_hash: AddressHash::new(destination),
-            name: DestinationName::new("lxmf", "delivery"),
-        };
+        let destination_hash = AddressHash::new(destination);
         let transport = self.transport.clone();
+        let peer_crypto = self.peer_crypto.clone();
         let receipt_map = self.receipt_map.clone();
+        let receipt_tx = self.receipt_tx.clone();
         let message_id = record.id.clone();
+        let destination_hex = record.destination.clone();
         tokio::spawn(async move {
+            log_delivery_trace(&message_id, &destination_hex, "start", "delivery requested");
+            let mut identity = peer_identity;
+            // Refresh routing for the destination before link setup.
+            transport.request_path(&destination_hash, None, None).await;
+            log_delivery_trace(&message_id, &destination_hex, "path-request", "requested");
+
+            if identity.is_none() {
+                log_delivery_trace(
+                    &message_id,
+                    &destination_hex,
+                    "identity",
+                    "waiting for announce",
+                );
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+                while tokio::time::Instant::now() < deadline {
+                    if let Some(found) = transport.destination_identity(&destination_hash).await {
+                        identity = Some(found);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+
+            let Some(identity) = identity else {
+                log_delivery_trace(&message_id, &destination_hex, "identity", "not found");
+                let _ = receipt_tx.send(ReceiptEvent {
+                    message_id,
+                    status: "failed: peer not announced".to_string(),
+                });
+                return;
+            };
+            log_delivery_trace(&message_id, &destination_hex, "identity", "resolved");
+
+            if let Ok(mut peers) = peer_crypto.lock() {
+                peers.insert(destination_hex.clone(), PeerCrypto { identity });
+            }
+
+            let destination_desc = reticulum::destination::DestinationDesc {
+                identity,
+                address_hash: destination_hash,
+                name: DestinationName::new("lxmf", "delivery"),
+            };
+
             let result = send_via_link(
                 transport.as_ref(),
                 destination_desc,
@@ -136,9 +179,88 @@ impl OutboundBridge for TransportBridge {
                 std::time::Duration::from_secs(20),
             )
             .await;
-            if let Ok(packet) = result {
-                let packet_hash = hex::encode(packet.hash().to_bytes());
-                track_receipt_mapping(&receipt_map, &packet_hash, &message_id);
+            match result {
+                Ok(packet) => {
+                    let packet_hash = hex::encode(packet.hash().to_bytes());
+                    track_receipt_mapping(&receipt_map, &packet_hash, &message_id);
+                    let detail = format!("packet_hash={packet_hash}");
+                    log_delivery_trace(&message_id, &destination_hex, "link", &detail);
+                    let _ = receipt_tx.send(ReceiptEvent {
+                        message_id,
+                        status: "sent: link".to_string(),
+                    });
+                }
+                Err(err) => {
+                    let err_detail = format!("failed err={err}");
+                    log_delivery_trace(&message_id, &destination_hex, "link", &err_detail);
+                    eprintln!(
+                        "[daemon] link delivery failed dst={} msg_id={} err={}; trying opportunistic",
+                        destination_hex, message_id, err
+                    );
+                    let _ = receipt_tx.send(ReceiptEvent {
+                        message_id: message_id.clone(),
+                        status: format!("link failed: {err}; trying opportunistic"),
+                    });
+                    // Opportunistic SINGLE packets must carry LXMF wire bytes
+                    // without the destination prefix. Receivers prepend the
+                    // packet destination hash before unpacking.
+                    let opportunistic_payload = opportunistic_payload(&payload, &destination);
+                    let mut data = PacketDataBuffer::new();
+                    if data.write(opportunistic_payload).is_err() {
+                        log_delivery_trace(
+                            &message_id,
+                            &destination_hex,
+                            "opportunistic",
+                            "payload too large",
+                        );
+                        let _ = receipt_tx.send(ReceiptEvent {
+                            message_id,
+                            status: format!("failed: {}", err),
+                        });
+                        return;
+                    }
+
+                    let packet = Packet {
+                        header: Header {
+                            ifac_flag: IfacFlag::Open,
+                            header_type: HeaderType::Type1,
+                            context_flag: ContextFlag::Unset,
+                            propagation_type: PropagationType::Broadcast,
+                            destination_type: DestinationType::Single,
+                            packet_type: PacketType::Data,
+                            hops: 0,
+                        },
+                        ifac: None,
+                        destination: destination_hash,
+                        transport: None,
+                        context: PacketContext::None,
+                        data,
+                    };
+                    let packet_hash = hex::encode(packet.hash().to_bytes());
+                    track_receipt_mapping(&receipt_map, &packet_hash, &message_id);
+                    log_delivery_trace(&message_id, &destination_hex, "opportunistic", "sending");
+                    let trace = transport.send_packet_with_trace(packet).await;
+                    let trace_detail = send_trace_detail(trace);
+                    log_delivery_trace(
+                        &message_id,
+                        &destination_hex,
+                        "opportunistic",
+                        &trace_detail,
+                    );
+                    let outcome = trace.outcome;
+                    if !matches!(
+                        outcome,
+                        SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast
+                    ) {
+                        if let Ok(mut map) = receipt_map.lock() {
+                            map.remove(&packet_hash);
+                        }
+                    }
+                    let _ = receipt_tx.send(ReceiptEvent {
+                        message_id,
+                        status: send_outcome_status("opportunistic", outcome),
+                    });
+                }
             }
         });
         Ok(())
@@ -169,6 +291,95 @@ fn parse_destination_hex(input: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+fn opportunistic_payload<'a>(payload: &'a [u8], destination: &[u8; 16]) -> &'a [u8] {
+    if payload.len() > 16 && payload[..16] == destination[..] {
+        &payload[16..]
+    } else {
+        payload
+    }
+}
+
+fn log_delivery_trace(message_id: &str, destination: &str, stage: &str, detail: &str) {
+    eprintln!(
+        "[delivery-trace] msg_id={} dst={} stage={} {}",
+        message_id, destination, stage, detail
+    );
+}
+
+fn send_trace_detail(trace: SendPacketTrace) -> String {
+    let direct_iface = trace
+        .direct_iface
+        .map(|iface| iface.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "outcome={:?} direct_iface={} broadcast={}",
+        trace.outcome, direct_iface, trace.broadcast
+    )
+}
+
+fn send_outcome_status(method: &str, outcome: SendPacketOutcome) -> String {
+    match outcome {
+        SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast => {
+            format!("sent: {method}")
+        }
+        SendPacketOutcome::DroppedMissingDestinationIdentity => {
+            format!("failed: {method} missing destination identity")
+        }
+        SendPacketOutcome::DroppedCiphertextTooLarge => {
+            format!("failed: {method} payload too large")
+        }
+        SendPacketOutcome::DroppedEncryptFailed => format!("failed: {method} encrypt failed"),
+        SendPacketOutcome::DroppedNoRoute => format!("failed: {method} no route"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{opportunistic_payload, send_outcome_status};
+    use reticulum::transport::SendPacketOutcome;
+
+    #[test]
+    fn opportunistic_payload_strips_destination_prefix() {
+        let destination = [0xAA; 16];
+        let mut payload = destination.to_vec();
+        payload.extend_from_slice(&[1, 2, 3, 4]);
+        assert_eq!(opportunistic_payload(&payload, &destination), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn opportunistic_payload_keeps_payload_without_prefix() {
+        let destination = [0xAA; 16];
+        let payload = vec![0xBB; 24];
+        assert_eq!(
+            opportunistic_payload(&payload, &destination),
+            payload.as_slice()
+        );
+    }
+
+    #[test]
+    fn send_outcome_status_maps_success() {
+        assert_eq!(
+            send_outcome_status("opportunistic", SendPacketOutcome::SentDirect),
+            "sent: opportunistic"
+        );
+    }
+
+    #[test]
+    fn send_outcome_status_maps_failures() {
+        assert_eq!(
+            send_outcome_status(
+                "opportunistic",
+                SendPacketOutcome::DroppedMissingDestinationIdentity
+            ),
+            "failed: opportunistic missing destination identity"
+        );
+        assert_eq!(
+            send_outcome_status("opportunistic", SendPacketOutcome::DroppedNoRoute),
+            "failed: opportunistic no route"
+        );
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let local = LocalSet::new();
@@ -188,15 +399,16 @@ async fn main() {
             let local_display_name = std::env::var("LXMF_DISPLAY_NAME")
                 .ok()
                 .and_then(|value| normalize_display_name(&value));
-            let daemon_config = args.config.as_ref().and_then(|path| {
-                match DaemonConfig::from_path(path) {
-                    Ok(config) => Some(config),
-                    Err(err) => {
-                        eprintln!("[daemon] failed to load config {}: {}", path.display(), err);
-                        None
-                    }
-                }
-            });
+            let daemon_config =
+                args.config
+                    .as_ref()
+                    .and_then(|path| match DaemonConfig::from_path(path) {
+                        Ok(config) => Some(config),
+                        Err(err) => {
+                            eprintln!("[daemon] failed to load config {}: {}", path.display(), err);
+                            None
+                        }
+                    });
             let mut configured_interfaces = daemon_config
                 .as_ref()
                 .map(|config| {
@@ -219,6 +431,8 @@ async fn main() {
                 Arc::new(std::sync::Mutex::new(HashMap::new()));
             let mut announce_destination: Option<Arc<tokio::sync::Mutex<SingleInputDestination>>> =
                 None;
+            let mut delivery_destination_hash_hex: Option<String> = None;
+            let mut delivery_source_hash = [0u8; 16];
             let receipt_map: Arc<std::sync::Mutex<HashMap<String, String>>> =
                 Arc::new(std::sync::Mutex::new(HashMap::new()));
             let (receipt_tx, mut receipt_rx) = unbounded_channel();
@@ -229,7 +443,7 @@ async fn main() {
                 transport_instance
                     .set_receipt_handler(Box::new(ReceiptBridge::new(
                         receipt_map.clone(),
-                        receipt_tx,
+                        receipt_tx.clone(),
                     )))
                     .await;
                 let iface_manager = transport_instance.iface_manager();
@@ -266,6 +480,9 @@ async fn main() {
                     .await;
                 {
                     let dest = destination.lock().await;
+                    delivery_source_hash.copy_from_slice(dest.desc.address_hash.as_slice());
+                    delivery_destination_hash_hex =
+                        Some(hex::encode(dest.desc.address_hash.as_slice()));
                     println!(
                         "[daemon] delivery destination hash={}",
                         hex::encode(dest.desc.address_hash.as_slice())
@@ -282,14 +499,14 @@ async fn main() {
                     Arc::new(TransportBridge::new(
                         transport.clone(),
                         identity.clone(),
+                        delivery_source_hash,
                         destination.clone(),
-                        local_display_name
-                            .as_ref()
-                            .and_then(|display_name| {
-                                encode_delivery_display_name_app_data(display_name)
-                            }),
+                        local_display_name.as_ref().and_then(|display_name| {
+                            encode_delivery_display_name_app_data(display_name)
+                        }),
                         peer_crypto.clone(),
                         receipt_map.clone(),
+                        receipt_tx.clone(),
                     ))
                 });
 
@@ -306,6 +523,7 @@ async fn main() {
                 outbound_bridge,
                 announce_bridge,
             ));
+            daemon.set_delivery_destination_hash(delivery_destination_hash_hex);
             daemon.replace_interfaces(configured_interfaces);
             daemon.set_propagation_state(transport.is_some(), None, 0);
 
@@ -318,7 +536,17 @@ async fn main() {
                 let daemon_receipts = daemon.clone();
                 tokio::task::spawn_local(async move {
                     while let Some(event) = receipt_rx.recv().await {
-                        let _ = handle_receipt_event(&daemon_receipts, event);
+                        let message_id = event.message_id.clone();
+                        let status = event.status.clone();
+                        let detail = format!("status={status}");
+                        log_delivery_trace(&message_id, "-", "receipt-update", &detail);
+                        let result = handle_receipt_event(&daemon_receipts, event);
+                        if let Err(err) = result {
+                            let detail = format!("persist-failed err={err}");
+                            log_delivery_trace(&message_id, "-", "receipt-persist", &detail);
+                        } else {
+                            log_delivery_trace(&message_id, "-", "receipt-persist", "ok");
+                        }
                     }
                 });
             }

@@ -210,6 +210,23 @@ pub struct Transport {
     cancel: CancellationToken,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendPacketOutcome {
+    SentDirect,
+    SentBroadcast,
+    DroppedMissingDestinationIdentity,
+    DroppedCiphertextTooLarge,
+    DroppedEncryptFailed,
+    DroppedNoRoute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendPacketTrace {
+    pub outcome: SendPacketOutcome,
+    pub direct_iface: Option<AddressHash>,
+    pub broadcast: bool,
+}
+
 impl TransportConfig {
     pub fn new<T: Into<String>>(name: T, identity: &PrivateIdentity, broadcast: bool) -> Self {
         Self {
@@ -464,6 +481,16 @@ impl Transport {
     pub async fn send_packet(&self, packet: Packet) {
         let mut handler = self.handler.lock().await;
         handler.send_packet(packet).await;
+    }
+
+    pub async fn send_packet_with_outcome(&self, packet: Packet) -> SendPacketOutcome {
+        let mut handler = self.handler.lock().await;
+        handler.send_packet_with_outcome(packet).await
+    }
+
+    pub async fn send_packet_with_trace(&self, packet: Packet) -> SendPacketTrace {
+        let mut handler = self.handler.lock().await;
+        handler.send_packet_with_trace(packet).await
     }
 
     pub async fn send_announce(
@@ -800,7 +827,15 @@ impl Drop for Transport {
 }
 
 impl TransportHandler {
-    async fn send_packet(&mut self, mut packet: Packet) {
+    async fn send_packet(&mut self, packet: Packet) {
+        let _ = self.send_packet_with_trace(packet).await;
+    }
+
+    async fn send_packet_with_outcome(&mut self, packet: Packet) -> SendPacketOutcome {
+        self.send_packet_with_trace(packet).await.outcome
+    }
+
+    async fn send_packet_with_trace(&mut self, mut packet: Packet) -> SendPacketTrace {
         if packet.header.packet_type == PacketType::Proof {
             eprintln!(
                 "[tp] send_proof dst={} ctx={:02x}",
@@ -827,7 +862,11 @@ impl TransportHandler {
                     self.config.name,
                     packet.destination
                 );
-                return;
+                return SendPacketTrace {
+                    outcome: SendPacketOutcome::DroppedMissingDestinationIdentity,
+                    direct_iface: None,
+                    broadcast: false,
+                };
             };
             let identity = destination.lock().await.identity;
             let salt = identity.address_hash.as_slice();
@@ -845,7 +884,11 @@ impl TransportHandler {
                             self.config.name,
                             packet.destination
                         );
-                        return;
+                        return SendPacketTrace {
+                            outcome: SendPacketOutcome::DroppedCiphertextTooLarge,
+                            direct_iface: None,
+                            broadcast: false,
+                        };
                     }
                     packet.data = buffer;
                 }
@@ -856,17 +899,50 @@ impl TransportHandler {
                         packet.destination,
                         err
                     );
-                    return;
+                    return SendPacketTrace {
+                        outcome: SendPacketOutcome::DroppedEncryptFailed,
+                        direct_iface: None,
+                        broadcast: false,
+                    };
                 }
             }
         }
 
-        let message = TxMessage {
-            tx_type: TxMessageType::Broadcast(None),
-            packet,
-        };
-
-        self.send(message).await;
+        let (packet, maybe_iface) = self.path_table.handle_packet(&packet);
+        if let Some(iface) = maybe_iface {
+            self.send(TxMessage {
+                tx_type: TxMessageType::Direct(iface),
+                packet,
+            })
+            .await;
+            SendPacketTrace {
+                outcome: SendPacketOutcome::SentDirect,
+                direct_iface: Some(iface),
+                broadcast: false,
+            }
+        } else if self.config.broadcast {
+            self.send(TxMessage {
+                tx_type: TxMessageType::Broadcast(None),
+                packet,
+            })
+            .await;
+            SendPacketTrace {
+                outcome: SendPacketOutcome::SentBroadcast,
+                direct_iface: None,
+                broadcast: true,
+            }
+        } else {
+            log::trace!(
+                "tp({}): no route for outbound packet dst={}",
+                self.config.name,
+                packet.destination
+            );
+            SendPacketTrace {
+                outcome: SendPacketOutcome::DroppedNoRoute,
+                direct_iface: None,
+                broadcast: false,
+            }
+        }
     }
 
     async fn send(&self, message: TxMessage) {
@@ -1321,7 +1397,10 @@ async fn handle_announce<'a>(
             }
         }
     }
-    let dest_hash = announce.destination.identity.address_hash;
+    // Retransmit/path bookkeeping must use the announced destination hash,
+    // not the bare identity hash, otherwise peers learn only identity routes
+    // and cannot resolve application destinations like `lxmf.delivery`.
+    let dest_hash = announce.destination.desc.address_hash;
     let destination = Arc::new(Mutex::new(announce.destination));
 
     if !destination_known {
@@ -1912,8 +1991,9 @@ mod tests {
     use super::*;
 
     use crate::destination::link::{LinkEvent, LinkEventData, LinkPayload};
+    use crate::destination::{DestinationName, SingleInputDestination};
     use crate::identity::PrivateIdentity;
-    use crate::packet::HeaderType;
+    use crate::packet::{Header, HeaderType};
     use rand_core::OsRng;
     use tokio::time::{timeout, Duration};
 
@@ -2021,5 +2101,85 @@ mod tests {
                 .filter_duplicate_packets(&duplicate)
                 .await
         );
+    }
+
+    #[tokio::test]
+    async fn announce_retransmit_key_uses_destination_hash() {
+        let local_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut config = TransportConfig::new("test", &local_identity, true);
+        config.set_retransmit(true);
+        let transport = Transport::new(config);
+        let handler = transport.get_handler();
+
+        let remote_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut remote_destination =
+            SingleInputDestination::new(remote_identity, DestinationName::new("lxmf", "delivery"));
+        let announce = remote_destination
+            .announce(OsRng, None)
+            .expect("valid announce packet");
+
+        let announced_destination = announce.destination;
+        let announced_identity = *remote_destination.identity.address_hash();
+        assert_ne!(
+            announced_destination, announced_identity,
+            "destination hash must differ from identity hash for named destinations"
+        );
+
+        let iface = AddressHash::new_from_rand(OsRng);
+        handle_announce(&announce, handler.lock().await, iface).await;
+
+        let mut guard = handler.lock().await;
+        let transport_id = *guard.config.identity.address_hash();
+        let keyed_by_destination = guard
+            .announce_table
+            .new_packet(&announced_destination, &transport_id);
+        assert!(
+            keyed_by_destination.is_some(),
+            "announce retransmit should be keyed by destination hash"
+        );
+        let keyed_by_identity = guard
+            .announce_table
+            .new_packet(&announced_identity, &transport_id);
+        assert!(
+            keyed_by_identity.is_none(),
+            "identity hash must not be used as announce retransmit key"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_packet_with_outcome_reports_missing_identity() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let config = TransportConfig::new("test", &identity, true);
+        let transport = Transport::new(config);
+
+        let packet = Packet {
+            destination: AddressHash::new_from_rand(OsRng),
+            ..Default::default()
+        };
+        let outcome = transport.send_packet_with_outcome(packet).await;
+
+        assert_eq!(
+            outcome,
+            SendPacketOutcome::DroppedMissingDestinationIdentity
+        );
+    }
+
+    #[tokio::test]
+    async fn send_packet_with_outcome_reports_no_route() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let config = TransportConfig::new("test", &identity, false);
+        let transport = Transport::new(config);
+
+        let packet = Packet {
+            header: Header {
+                packet_type: PacketType::Announce,
+                ..Default::default()
+            },
+            destination: AddressHash::new_from_rand(OsRng),
+            ..Default::default()
+        };
+        let outcome = transport.send_packet_with_outcome(packet).await;
+
+        assert_eq!(outcome, SendPacketOutcome::DroppedNoRoute);
     }
 }

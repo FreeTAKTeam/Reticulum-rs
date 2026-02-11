@@ -11,7 +11,9 @@ fn status_returns_identity() {
             params: None,
         })
         .unwrap();
-    assert!(resp.result.unwrap()["identity_hash"].is_string());
+    let result = resp.result.unwrap();
+    assert!(result["identity_hash"].is_string());
+    assert!(result["delivery_destination_hash"].is_string());
 }
 
 #[test]
@@ -25,7 +27,26 @@ fn status_uses_custom_identity() {
             params: None,
         })
         .unwrap();
-    assert_eq!(resp.result.unwrap()["identity_hash"], "daemon-identity");
+    let result = resp.result.unwrap();
+    assert_eq!(result["identity_hash"], "daemon-identity");
+    assert_eq!(result["delivery_destination_hash"], "daemon-identity");
+}
+
+#[test]
+fn status_prefers_configured_delivery_destination_hash() {
+    let store = MessagesStore::in_memory().unwrap();
+    let daemon = RpcDaemon::with_store(store, "daemon-identity".into());
+    daemon.set_delivery_destination_hash(Some("delivery-hash".into()));
+    let resp = daemon
+        .handle_rpc(RpcRequest {
+            id: 1,
+            method: "status".into(),
+            params: None,
+        })
+        .unwrap();
+    let result = resp.result.unwrap();
+    assert_eq!(result["identity_hash"], "daemon-identity");
+    assert_eq!(result["delivery_destination_hash"], "delivery-hash");
 }
 
 #[test]

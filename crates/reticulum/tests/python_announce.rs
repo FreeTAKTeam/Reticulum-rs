@@ -1,8 +1,8 @@
 use reticulum::destination::DestinationAnnounce;
 use reticulum::hash::AddressHash;
 use reticulum::packet::{
-    DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext, PacketDataBuffer,
-    PacketType, PropagationType,
+    ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+    PacketDataBuffer, PacketType, PropagationType,
 };
 
 #[test]
@@ -17,6 +17,7 @@ fn python_announce_signature_validates() {
         header: Header {
             ifac_flag: IfacFlag::Open,
             header_type: HeaderType::Type1,
+            context_flag: ContextFlag::Unset,
             propagation_type: PropagationType::Broadcast,
             destination_type: DestinationType::Single,
             packet_type: PacketType::Announce,

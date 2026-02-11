@@ -49,20 +49,32 @@ impl From<u8> for HeaderType {
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum PropagationType {
-    Broadcast = 0b00,
-    Transport = 0b01,
-    Reserved1 = 0b10,
-    Reserved2 = 0b11,
+    Broadcast = 0b0,
+    Transport = 0b1,
 }
 
 impl From<u8> for PropagationType {
     fn from(value: u8) -> Self {
-        match value & 0b11 {
-            0b00 => PropagationType::Broadcast,
-            0b01 => PropagationType::Transport,
-            0b10 => PropagationType::Reserved1,
-            0b11 => PropagationType::Reserved2,
+        match value & 0b1 {
+            0b0 => PropagationType::Broadcast,
+            0b1 => PropagationType::Transport,
             _ => PropagationType::Broadcast,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum ContextFlag {
+    Unset = 0b0,
+    Set = 0b1,
+}
+
+impl From<u8> for ContextFlag {
+    fn from(value: u8) -> Self {
+        match value & 0b1 {
+            0b0 => ContextFlag::Unset,
+            0b1 => ContextFlag::Set,
+            _ => ContextFlag::Unset,
         }
     }
 }
@@ -164,6 +176,7 @@ impl From<u8> for PacketContext {
 pub struct Header {
     pub ifac_flag: IfacFlag,
     pub header_type: HeaderType,
+    pub context_flag: ContextFlag,
     pub propagation_type: PropagationType,
     pub destination_type: DestinationType,
     pub packet_type: PacketType,
@@ -175,6 +188,7 @@ impl Default for Header {
         Self {
             ifac_flag: IfacFlag::Open,
             header_type: HeaderType::Type1,
+            context_flag: ContextFlag::Unset,
             propagation_type: PropagationType::Broadcast,
             destination_type: DestinationType::Single,
             packet_type: PacketType::Data,
@@ -187,6 +201,7 @@ impl Header {
     pub fn to_meta(&self) -> u8 {
         (self.ifac_flag as u8) << 7
             | (self.header_type as u8) << 6
+            | (self.context_flag as u8) << 5
             | (self.propagation_type as u8) << 4
             | (self.destination_type as u8) << 2
             | (self.packet_type as u8)
@@ -196,6 +211,7 @@ impl Header {
         Self {
             ifac_flag: IfacFlag::from(meta >> 7),
             header_type: HeaderType::from(meta >> 6),
+            context_flag: ContextFlag::from(meta >> 5),
             propagation_type: PropagationType::from(meta >> 4),
             destination_type: DestinationType::from(meta >> 2),
             packet_type: PacketType::from(meta),
@@ -208,9 +224,10 @@ impl fmt::Display for Header {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{:b}{:b}{:0>2b}{:0>2b}{:0>2b}.{}",
+            "{:b}{:b}{:b}{:b}{:0>2b}{:0>2b}.{}",
             self.ifac_flag as u8,
             self.header_type as u8,
+            self.context_flag as u8,
             self.propagation_type as u8,
             self.destination_type as u8,
             self.packet_type as u8,
@@ -374,5 +391,33 @@ impl fmt::Display for Packet {
         write!(f, " 0x[{}]]", self.data.len())?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ContextFlag, DestinationType, Header, HeaderType, IfacFlag, PacketType, PropagationType,
+    };
+
+    #[test]
+    fn header_meta_roundtrip_preserves_context_and_transport_bits() {
+        let header = Header {
+            ifac_flag: IfacFlag::Open,
+            header_type: HeaderType::Type1,
+            context_flag: ContextFlag::Set,
+            propagation_type: PropagationType::Transport,
+            destination_type: DestinationType::Single,
+            packet_type: PacketType::Announce,
+            hops: 0,
+        };
+
+        let meta = header.to_meta();
+        assert_eq!(meta & 0b0010_0000, 0b0010_0000);
+        assert_eq!(meta & 0b0001_0000, 0b0001_0000);
+
+        let decoded = Header::from_meta(meta);
+        assert_eq!(decoded.context_flag, ContextFlag::Set);
+        assert_eq!(decoded.propagation_type, PropagationType::Transport);
     }
 }

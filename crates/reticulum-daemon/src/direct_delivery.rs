@@ -3,7 +3,7 @@ use std::io;
 use reticulum::destination::link::{LinkEvent, LinkStatus};
 use reticulum::destination::DestinationDesc;
 use reticulum::packet::Packet;
-use reticulum::transport::Transport;
+use reticulum::transport::{SendPacketOutcome, Transport};
 use tokio::time::{timeout, Duration, Instant};
 
 pub async fn send_via_link(
@@ -62,7 +62,28 @@ pub async fn send_via_link(
         .await
         .data_packet(payload)
         .map_err(|err| io::Error::other(format!("{:?}", err)))?;
-    transport.send_packet(packet).await;
+
+    let outcome = transport.send_packet_with_outcome(packet).await;
+    if !matches!(
+        outcome,
+        SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast
+    ) {
+        return Err(io::Error::other(format!(
+            "link packet not sent: {}",
+            send_outcome_label(outcome)
+        )));
+    }
 
     Ok(packet)
+}
+
+fn send_outcome_label(outcome: SendPacketOutcome) -> &'static str {
+    match outcome {
+        SendPacketOutcome::SentDirect => "sent direct",
+        SendPacketOutcome::SentBroadcast => "sent broadcast",
+        SendPacketOutcome::DroppedMissingDestinationIdentity => "missing destination identity",
+        SendPacketOutcome::DroppedCiphertextTooLarge => "ciphertext too large",
+        SendPacketOutcome::DroppedEncryptFailed => "encrypt failed",
+        SendPacketOutcome::DroppedNoRoute => "no route",
+    }
 }

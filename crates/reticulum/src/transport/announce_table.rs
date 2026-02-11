@@ -5,8 +5,8 @@ use tokio::time::{Duration, Instant};
 use crate::hash::AddressHash;
 use crate::iface::{TxMessage, TxMessageType};
 use crate::packet::{
-    DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext, PacketType,
-    PropagationType,
+    ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
+    PacketType, PropagationType,
 };
 
 #[derive(Clone)]
@@ -51,6 +51,7 @@ impl AnnounceEntry {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type2,
+                context_flag: ContextFlag::Unset,
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Single,
                 packet_type: PacketType::Announce,

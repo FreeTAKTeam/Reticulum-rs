@@ -14,6 +14,7 @@ fn daemon_status_ex_exposes_capabilities() {
 
     let result = resp.result.expect("result");
     assert_eq!(result.get("running"), Some(&json!(true)));
+    assert!(result.get("delivery_destination_hash").is_some());
     let caps = result
         .get("capabilities")
         .and_then(|v| v.as_array())

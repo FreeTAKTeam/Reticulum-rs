@@ -13,6 +13,7 @@ use crate::packet::DestinationType;
 use crate::packet::Header;
 use crate::packet::HeaderType;
 use crate::packet::IfacFlag;
+use crate::packet::ContextFlag;
 use crate::packet::Packet;
 use crate::packet::PacketContext;
 use crate::packet::PacketDataBuffer;
@@ -151,6 +152,7 @@ impl PathRequests {
             header: Header {
                 ifac_flag: IfacFlag::Open,
                 header_type: HeaderType::Type1,
+                context_flag: ContextFlag::Unset,
                 propagation_type: PropagationType::Broadcast,
                 destination_type: DestinationType::Plain,
                 packet_type: PacketType::Data,

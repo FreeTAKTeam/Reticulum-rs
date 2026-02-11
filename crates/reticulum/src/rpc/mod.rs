@@ -108,6 +108,7 @@ pub struct TicketRecord {
 pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
+    delivery_destination_hash: Mutex<Option<String>>,
     events: broadcast::Sender<RpcEvent>,
     event_queue: Mutex<VecDeque<RpcEvent>>,
     peers: Mutex<HashMap<String, PeerRecord>>,
@@ -266,6 +267,7 @@ impl RpcDaemon {
         Self {
             store,
             identity_hash,
+            delivery_destination_hash: Mutex::new(None),
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
@@ -290,6 +292,7 @@ impl RpcDaemon {
         Self {
             store,
             identity_hash,
+            delivery_destination_hash: Mutex::new(None),
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
@@ -315,6 +318,7 @@ impl RpcDaemon {
         Self {
             store,
             identity_hash,
+            delivery_destination_hash: Mutex::new(None),
             events,
             event_queue: Mutex::new(VecDeque::new()),
             peers: Mutex::new(HashMap::new()),
@@ -339,6 +343,21 @@ impl RpcDaemon {
     pub fn test_instance_with_identity(identity: impl Into<String>) -> Self {
         let store = MessagesStore::in_memory().expect("in-memory store");
         Self::with_store(store, identity.into())
+    }
+
+    pub fn set_delivery_destination_hash(&self, hash: Option<String>) {
+        let mut guard = self
+            .delivery_destination_hash
+            .lock()
+            .expect("delivery_destination_hash mutex poisoned");
+        *guard = hash.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
     }
 
     pub fn replace_interfaces(&self, interfaces: Vec<InterfaceRecord>) {
@@ -453,6 +472,7 @@ impl RpcDaemon {
                 id: request.id,
                 result: Some(json!({
                     "identity_hash": self.identity_hash,
+                    "delivery_destination_hash": self.local_delivery_hash(),
                     "running": true
                 })),
                 error: None,
@@ -489,6 +509,7 @@ impl RpcDaemon {
                     id: request.id,
                     result: Some(json!({
                         "identity_hash": self.identity_hash,
+                        "delivery_destination_hash": self.local_delivery_hash(),
                         "running": true,
                         "peer_count": peer_count,
                         "message_count": message_count,
@@ -558,7 +579,8 @@ impl RpcDaemon {
                             "interface type is required",
                         ));
                     }
-                    if iface.kind == "tcp_client" && (iface.host.is_none() || iface.port.is_none()) {
+                    if iface.kind == "tcp_client" && (iface.host.is_none() || iface.port.is_none())
+                    {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
                             "tcp_client requires host and port",
@@ -764,10 +786,7 @@ impl RpcDaemon {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
                 let policy = {
-                    let mut guard = self
-                        .delivery_policy
-                        .lock()
-                        .expect("policy mutex poisoned");
+                    let mut guard = self.delivery_policy.lock().expect("policy mutex poisoned");
                     if let Some(value) = parsed.auth_required {
                         guard.auth_required = value;
                     }
@@ -1044,7 +1063,8 @@ impl RpcDaemon {
                 let parsed: AnnounceReceivedParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = parsed.timestamp.unwrap_or_else(now_i64);
-                let record = self.upsert_peer(parsed.peer, timestamp, parsed.name, parsed.name_source);
+                let record =
+                    self.upsert_peer(parsed.peer, timestamp, parsed.name, parsed.name_source);
                 let event = RpcEvent {
                     event_type: "announce_received".into(),
                     payload: json!({
@@ -1125,7 +1145,7 @@ impl RpcDaemon {
         include_ticket: Option<bool>,
     ) -> Result<RpcResponse, std::io::Error> {
         let timestamp = now_i64();
-        let record = MessageRecord {
+        let mut record = MessageRecord {
             id: id.clone(),
             source,
             destination,
@@ -1140,10 +1160,30 @@ impl RpcDaemon {
         self.store
             .insert_message(&record)
             .map_err(std::io::Error::other)?;
-        if let Some(bridge) = &self.outbound_bridge {
-            let _ = bridge.deliver(&record);
+        let deliver_result = if let Some(bridge) = &self.outbound_bridge {
+            bridge.deliver(&record)
         } else {
             let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
+            Ok(())
+        };
+        if let Err(err) = deliver_result {
+            let status = format!("failed: {err}");
+            let _ = self.store.update_receipt_status(&id, &status);
+            record.receipt_status = Some(status);
+            let event = RpcEvent {
+                event_type: "outbound".into(),
+                payload: json!({ "message": record, "method": method, "error": err.to_string() }),
+            };
+            self.push_event(event.clone());
+            let _ = self.events.send(event);
+            return Ok(RpcResponse {
+                id: request_id,
+                result: None,
+                error: Some(RpcError {
+                    code: "DELIVERY_FAILED".into(),
+                    message: err.to_string(),
+                }),
+            });
         }
         let event = RpcEvent {
             event_type: "outbound".into(),
@@ -1157,6 +1197,14 @@ impl RpcDaemon {
             result: Some(json!({ "message_id": id })),
             error: None,
         })
+    }
+
+    fn local_delivery_hash(&self) -> String {
+        self.delivery_destination_hash
+            .lock()
+            .expect("delivery_destination_hash mutex poisoned")
+            .clone()
+            .unwrap_or_else(|| self.identity_hash.clone())
     }
 
     fn capabilities() -> Vec<&'static str> {
