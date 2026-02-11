@@ -79,5 +79,4 @@ This project is licensed under the MIT license.
 
 ---
 
-© Beechat Network Systems Ltd. All rights reserved.
-https://beechat.network/
+Maintained by FreeTAKTeam and contributors.
