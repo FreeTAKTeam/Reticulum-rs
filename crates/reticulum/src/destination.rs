@@ -313,30 +313,29 @@ impl DestinationAnnounce {
             );
         }
 
-        let verify_announce = |ratchet: Option<&[u8]>,
-                               signature: &[u8],
-                               app_data: &[u8]|
-         -> Result<(), RnsError> {
-            // Keeping signed data on stack is only option for now.
-            // Verification function doesn't support prehashed message.
-            let mut signed_data = PacketDataBuffer::new();
-            signed_data
-                .chain_write(destination.as_slice())?
-                .chain_write(public_key.as_bytes())?
-                .chain_write(verifying_key.as_bytes())?
-                .chain_write(name_hash)?
-                .chain_write(rand_hash)?;
-            if let Some(ratchet) = ratchet {
-                signed_data.chain_write(ratchet)?;
-            }
-            if !app_data.is_empty() {
-                signed_data.chain_write(app_data)?;
-            }
-            let signature = Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
-            identity
-                .verify(signed_data.as_slice(), &signature)
-                .map_err(|_| RnsError::IncorrectSignature)
-        };
+        let verify_announce =
+            |ratchet: Option<&[u8]>, signature: &[u8], app_data: &[u8]| -> Result<(), RnsError> {
+                // Keeping signed data on stack is only option for now.
+                // Verification function doesn't support prehashed message.
+                let mut signed_data = PacketDataBuffer::new();
+                signed_data
+                    .chain_write(destination.as_slice())?
+                    .chain_write(public_key.as_bytes())?
+                    .chain_write(verifying_key.as_bytes())?
+                    .chain_write(name_hash)?
+                    .chain_write(rand_hash)?;
+                if let Some(ratchet) = ratchet {
+                    signed_data.chain_write(ratchet)?;
+                }
+                if !app_data.is_empty() {
+                    signed_data.chain_write(app_data)?;
+                }
+                let signature =
+                    Signature::from_slice(signature).map_err(|_| RnsError::CryptoError)?;
+                identity
+                    .verify(signed_data.as_slice(), &signature)
+                    .map_err(|_| RnsError::IncorrectSignature)
+            };
 
         let remaining = announce_data.len().saturating_sub(offset);
         if remaining < SIGNATURE_LENGTH {

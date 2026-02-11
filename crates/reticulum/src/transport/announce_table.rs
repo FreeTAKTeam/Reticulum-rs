@@ -5,8 +5,8 @@ use tokio::time::{Duration, Instant};
 use crate::hash::AddressHash;
 use crate::iface::{TxMessage, TxMessageType};
 use crate::packet::{
-    ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
-    PacketType, PropagationType,
+    ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext, PacketType,
+    PropagationType,
 };
 
 #[derive(Clone)]
