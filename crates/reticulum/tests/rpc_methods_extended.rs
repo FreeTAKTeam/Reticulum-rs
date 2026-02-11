@@ -230,6 +230,22 @@ fn paper_ingest_detects_duplicates() {
 }
 
 #[test]
+fn paper_ingest_handles_utf8_uri_prefix_safely() {
+    let daemon = RpcDaemon::test_instance();
+    let unicode_body = "é".repeat(40);
+    let uri = format!("lxm://{unicode_body}");
+    let response = daemon
+        .handle_rpc(RpcRequest {
+            id: 16,
+            method: "paper_ingest_uri".into(),
+            params: Some(json!({ "uri": uri })),
+        })
+        .expect("paper ingest");
+    let result = response.result.expect("result");
+    assert_eq!(result["destination"], "é".repeat(32));
+}
+
+#[test]
 fn stamp_policy_and_ticket_generation() {
     let daemon = RpcDaemon::test_instance();
     daemon

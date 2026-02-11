@@ -951,11 +951,7 @@ impl RpcDaemon {
                 };
 
                 let body = parsed.uri.trim_start_matches("lxm://");
-                let destination = if body.len() >= 32 {
-                    body[..32].to_string()
-                } else {
-                    "".to_string()
-                };
+                let destination = first_n_chars(body, 32).unwrap_or_default();
 
                 Ok(RpcResponse {
                     id: request.id,
@@ -1386,6 +1382,17 @@ fn now_i64() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn first_n_chars(input: &str, n: usize) -> Option<String> {
+    if n == 0 {
+        return Some(String::new());
+    }
+    let end = input
+        .char_indices()
+        .nth(n - 1)
+        .map(|(idx, ch)| idx + ch.len_utf8())?;
+    Some(input[..end].to_string())
 }
 
 fn clean_optional_text(value: Option<String>) -> Option<String> {
