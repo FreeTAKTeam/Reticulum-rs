@@ -6,8 +6,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
-reticulum = { package = "reticulum-rs", path = "../reticulum" }
-lxmf = "0.1.0"
+reticulum = { package = "reticulum-rs", version = "0.1.2", path = "../reticulum" }
+lxmf = { version = "0.1.0", default-features = false }
 clap = { version = "4.5.29", features = ["derive"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 x25519-dalek = { version = "2.0.1" }
