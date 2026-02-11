@@ -1,0 +1,2185 @@
+use alloc::sync::Arc;
+use announce_limits::AnnounceLimits;
+use announce_table::AnnounceTable;
+use link_table::LinkTable;
+use packet_cache::PacketCache;
+use path_requests::create_path_request_destination;
+use path_requests::PathRequests;
+use path_requests::TagBytes;
+use path_table::PathTable;
+use rand_core::OsRng;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::time;
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
+
+use tokio::sync::broadcast;
+use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
+use x25519_dalek::PublicKey;
+
+use crate::destination::link::Link;
+use crate::destination::link::LinkEvent;
+use crate::destination::link::LinkEventData;
+use crate::destination::link::LinkHandleResult;
+use crate::destination::link::LinkId;
+use crate::destination::link::LinkStatus;
+use crate::destination::DestinationAnnounce;
+use crate::destination::DestinationDesc;
+use crate::destination::DestinationHandleStatus;
+use crate::destination::DestinationName;
+use crate::destination::SingleInputDestination;
+use crate::destination::SingleOutputDestination;
+
+use crate::error::RnsError;
+use crate::hash::{AddressHash, Hash, HASH_SIZE};
+use crate::identity::{Identity, PrivateIdentity};
+
+use crate::iface::InterfaceManager;
+use crate::iface::InterfaceRxReceiver;
+use crate::iface::RxMessage;
+use crate::iface::TxMessage;
+use crate::iface::TxMessageType;
+
+use crate::packet::DestinationType;
+use crate::packet::Packet;
+use crate::packet::PacketContext;
+use crate::packet::PacketDataBuffer;
+use crate::packet::PacketType;
+use crate::ratchets::{encrypt_for_public_key, now_secs, RatchetStore};
+use crate::resource::{build_resource_request_packet, ResourceEvent, ResourceManager};
+
+mod announce_limits;
+pub mod announce_table;
+pub mod discovery;
+mod link_table;
+mod packet_cache;
+mod path_requests;
+pub mod path_table;
+
+pub mod test_bridge {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use crate::rpc::RpcDaemon;
+    use crate::storage::messages::MessageRecord;
+
+    thread_local! {
+        static BRIDGE: RefCell<HashMap<String, Rc<RpcDaemon>>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn reset() {
+        BRIDGE.with(|bridge| bridge.borrow_mut().clear());
+    }
+
+    pub fn register(identity: impl Into<String>, daemon: Rc<RpcDaemon>) {
+        BRIDGE.with(|bridge| {
+            bridge.borrow_mut().insert(identity.into(), daemon);
+        });
+    }
+
+    pub fn deliver_outbound(record: &MessageRecord) -> bool {
+        let daemon = BRIDGE.with(|bridge| bridge.borrow().get(&record.destination).cloned());
+        let Some(daemon) = daemon else {
+            return false;
+        };
+        let inbound = MessageRecord {
+            id: record.id.clone(),
+            source: record.source.clone(),
+            destination: record.destination.clone(),
+            title: record.title.clone(),
+            content: record.content.clone(),
+            timestamp: record.timestamp,
+            direction: "in".into(),
+            fields: record.fields.clone(),
+            receipt_status: None,
+        };
+        let _ = daemon.accept_inbound_for_test(inbound);
+        true
+    }
+}
+
+// TODO: Configure via features
+const PACKET_TRACE: bool = false;
+pub const PATHFINDER_M: usize = 128; // Max hops
+
+const INTERVAL_LINKS_CHECK: Duration = Duration::from_secs(1);
+const INTERVAL_INPUT_LINK_CLEANUP: Duration = Duration::from_secs(20);
+const INTERVAL_OUTPUT_LINK_RESTART: Duration = Duration::from_secs(60);
+const INTERVAL_OUTPUT_LINK_REPEAT: Duration = Duration::from_secs(6);
+const INTERVAL_OUTPUT_LINK_KEEP: Duration = Duration::from_secs(5);
+const INTERVAL_IFACE_CLEANUP: Duration = Duration::from_secs(10);
+const INTERVAL_ANNOUNCES_RETRANSMIT: Duration = Duration::from_secs(1);
+const INTERVAL_KEEP_PACKET_CACHED: Duration = Duration::from_secs(180);
+const INTERVAL_PACKET_CACHE_CLEANUP: Duration = Duration::from_secs(90);
+
+// Other constants
+const KEEP_ALIVE_REQUEST: u8 = 0xFF;
+const KEEP_ALIVE_RESPONSE: u8 = 0xFE;
+
+#[derive(Clone)]
+pub struct ReceivedData {
+    pub destination: AddressHash,
+    pub data: PacketDataBuffer,
+    pub ratchet_used: bool,
+}
+
+pub struct TransportConfig {
+    name: String,
+    identity: PrivateIdentity,
+    broadcast: bool,
+    retransmit: bool,
+    announce_cache_capacity: usize,
+    announce_retry_limit: u8,
+    announce_queue_len: usize,
+    announce_cap: usize,
+    path_request_timeout_secs: u64,
+    link_proof_timeout_secs: u64,
+    link_idle_timeout_secs: u64,
+    resource_retry_interval_secs: u64,
+    resource_retry_limit: u8,
+    ratchet_store_path: Option<PathBuf>,
+}
+
+pub struct DeliveryReceipt {
+    pub message_id: [u8; 32],
+}
+
+impl DeliveryReceipt {
+    pub fn new(message_id: [u8; 32]) -> Self {
+        Self { message_id }
+    }
+}
+
+pub trait ReceiptHandler: Send + Sync {
+    fn on_receipt(&self, receipt: &DeliveryReceipt);
+}
+
+#[derive(Clone)]
+pub struct AnnounceEvent {
+    pub destination: Arc<Mutex<SingleOutputDestination>>,
+    pub app_data: PacketDataBuffer,
+    pub ratchet: Option<[u8; crate::destination::RATCHET_LENGTH]>,
+}
+
+pub(crate) struct TransportHandler {
+    config: TransportConfig,
+    iface_manager: Arc<Mutex<InterfaceManager>>,
+    announce_tx: broadcast::Sender<AnnounceEvent>,
+
+    path_table: PathTable,
+    announce_table: AnnounceTable,
+    link_table: LinkTable,
+    single_in_destinations: HashMap<AddressHash, Arc<Mutex<SingleInputDestination>>>,
+    single_out_destinations: HashMap<AddressHash, Arc<Mutex<SingleOutputDestination>>>,
+
+    announce_limits: AnnounceLimits,
+
+    out_links: HashMap<AddressHash, Arc<Mutex<Link>>>,
+    in_links: HashMap<AddressHash, Arc<Mutex<Link>>>,
+
+    packet_cache: Mutex<PacketCache>,
+
+    path_requests: PathRequests,
+
+    link_in_event_tx: broadcast::Sender<LinkEventData>,
+    received_data_tx: broadcast::Sender<ReceivedData>,
+    ratchet_store: Option<RatchetStore>,
+
+    resource_manager: ResourceManager,
+    resource_events_tx: broadcast::Sender<ResourceEvent>,
+
+    fixed_dest_path_requests: AddressHash,
+
+    cancel: CancellationToken,
+    receipt_handler: Option<Arc<dyn ReceiptHandler>>,
+}
+
+pub struct Transport {
+    name: String,
+    link_in_event_tx: broadcast::Sender<LinkEventData>,
+    link_out_event_tx: broadcast::Sender<LinkEventData>,
+    received_data_tx: broadcast::Sender<ReceivedData>,
+    iface_messages_tx: broadcast::Sender<RxMessage>,
+    resource_events_tx: broadcast::Sender<ResourceEvent>,
+    handler: Arc<Mutex<TransportHandler>>,
+    iface_manager: Arc<Mutex<InterfaceManager>>,
+    cancel: CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendPacketOutcome {
+    SentDirect,
+    SentBroadcast,
+    DroppedMissingDestinationIdentity,
+    DroppedCiphertextTooLarge,
+    DroppedEncryptFailed,
+    DroppedNoRoute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendPacketTrace {
+    pub outcome: SendPacketOutcome,
+    pub direct_iface: Option<AddressHash>,
+    pub broadcast: bool,
+}
+
+impl TransportConfig {
+    pub fn new<T: Into<String>>(name: T, identity: &PrivateIdentity, broadcast: bool) -> Self {
+        Self {
+            name: name.into(),
+            identity: identity.clone(),
+            broadcast,
+            retransmit: false,
+            announce_cache_capacity: 100_000,
+            announce_retry_limit: 5,
+            announce_queue_len: 64,
+            announce_cap: 128,
+            path_request_timeout_secs: 30,
+            link_proof_timeout_secs: 600,
+            link_idle_timeout_secs: 900,
+            resource_retry_interval_secs: 2,
+            resource_retry_limit: 5,
+            ratchet_store_path: None,
+        }
+    }
+
+    pub fn set_retransmit(&mut self, retransmit: bool) {
+        self.retransmit = retransmit;
+    }
+    pub fn set_broadcast(&mut self, broadcast: bool) {
+        self.broadcast = broadcast;
+    }
+
+    pub fn set_announce_cache_capacity(&mut self, capacity: usize) {
+        self.announce_cache_capacity = capacity;
+    }
+
+    pub fn set_announce_retry_limit(&mut self, limit: u8) {
+        self.announce_retry_limit = limit;
+    }
+
+    pub fn set_announce_queue_len(&mut self, len: usize) {
+        self.announce_queue_len = len;
+    }
+
+    pub fn set_announce_cap(&mut self, cap: usize) {
+        self.announce_cap = cap;
+    }
+
+    pub fn set_path_request_timeout_secs(&mut self, secs: u64) {
+        self.path_request_timeout_secs = secs;
+    }
+
+    pub fn set_link_proof_timeout_secs(&mut self, secs: u64) {
+        self.link_proof_timeout_secs = secs;
+    }
+
+    pub fn set_link_idle_timeout_secs(&mut self, secs: u64) {
+        self.link_idle_timeout_secs = secs;
+    }
+
+    pub fn set_resource_retry_interval_secs(&mut self, secs: u64) {
+        self.resource_retry_interval_secs = secs;
+    }
+
+    pub fn set_resource_retry_limit(&mut self, limit: u8) {
+        self.resource_retry_limit = limit;
+    }
+
+    pub fn set_ratchet_store_path(&mut self, path: PathBuf) {
+        self.ratchet_store_path = Some(path);
+    }
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            name: "tp".into(),
+            identity: PrivateIdentity::new_from_rand(OsRng),
+            broadcast: false,
+            retransmit: false,
+            announce_cache_capacity: 100_000,
+            announce_retry_limit: 5,
+            announce_queue_len: 64,
+            announce_cap: 128,
+            path_request_timeout_secs: 30,
+            link_proof_timeout_secs: 600,
+            link_idle_timeout_secs: 900,
+            resource_retry_interval_secs: 2,
+            resource_retry_limit: 5,
+            ratchet_store_path: None,
+        }
+    }
+}
+
+impl Transport {
+    pub fn new(config: TransportConfig) -> Self {
+        let (announce_tx, _) = tokio::sync::broadcast::channel(16);
+        let (link_in_event_tx, _) = tokio::sync::broadcast::channel(16);
+        let (link_out_event_tx, _) = tokio::sync::broadcast::channel(16);
+        let (received_data_tx, _) = tokio::sync::broadcast::channel(16);
+        let (iface_messages_tx, _) = tokio::sync::broadcast::channel(16);
+        let (resource_events_tx, _) = tokio::sync::broadcast::channel(16);
+
+        let iface_manager = InterfaceManager::new(16);
+
+        let rx_receiver = iface_manager.receiver();
+
+        let iface_manager = Arc::new(Mutex::new(iface_manager));
+
+        let announce_cache_capacity = config.announce_cache_capacity;
+        let announce_retry_limit = config.announce_retry_limit;
+        let announce_queue_len = config.announce_queue_len;
+        let announce_cap = config.announce_cap;
+        let path_request_timeout_secs = config.path_request_timeout_secs;
+        let link_proof_timeout_secs = config.link_proof_timeout_secs;
+        let link_idle_timeout_secs = config.link_idle_timeout_secs;
+        let resource_retry_interval_secs = config.resource_retry_interval_secs;
+        let resource_retry_limit = config.resource_retry_limit;
+        let ratchet_store = config.ratchet_store_path.as_ref().map(|path| {
+            let mut store = RatchetStore::new(path.clone());
+            store.clean_expired(now_secs());
+            store
+        });
+
+        let transport_id = if config.retransmit {
+            Some(*config.identity.address_hash())
+        } else {
+            None
+        };
+        let path_requests = PathRequests::new(
+            config.name.as_str(),
+            transport_id,
+            announce_queue_len,
+            announce_cap,
+            path_request_timeout_secs,
+        );
+
+        let path_request_dest = create_path_request_destination().desc.address_hash;
+
+        let cancel = CancellationToken::new();
+        let name = config.name.clone();
+        let handler = Arc::new(Mutex::new(TransportHandler {
+            config,
+            iface_manager: iface_manager.clone(),
+            announce_table: AnnounceTable::new(announce_cache_capacity, announce_retry_limit),
+            link_table: LinkTable::new(
+                Duration::from_secs(link_proof_timeout_secs),
+                Duration::from_secs(link_idle_timeout_secs),
+            ),
+            path_table: PathTable::new(),
+            single_in_destinations: HashMap::new(),
+            single_out_destinations: HashMap::new(),
+            announce_limits: AnnounceLimits::new(),
+            out_links: HashMap::new(),
+            in_links: HashMap::new(),
+            packet_cache: Mutex::new(PacketCache::new()),
+            path_requests,
+            announce_tx,
+            link_in_event_tx: link_in_event_tx.clone(),
+            received_data_tx: received_data_tx.clone(),
+            ratchet_store,
+            resource_manager: ResourceManager::new_with_config(
+                Duration::from_secs(resource_retry_interval_secs),
+                resource_retry_limit,
+            ),
+            resource_events_tx: resource_events_tx.clone(),
+            fixed_dest_path_requests: path_request_dest,
+            cancel: cancel.clone(),
+            receipt_handler: None,
+        }));
+
+        {
+            let handler = handler.clone();
+            tokio::spawn(manage_transport(
+                handler,
+                rx_receiver,
+                iface_messages_tx.clone(),
+            ))
+        };
+        {
+            let mut link_rx = link_in_event_tx.subscribe();
+            let received_data_tx = received_data_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    match link_rx.recv().await {
+                        Ok(event) => {
+                            if let LinkEvent::Data(payload) = event.event {
+                                let _ = received_data_tx.send(ReceivedData {
+                                    destination: event.address_hash,
+                                    data: PacketDataBuffer::new_from_slice(payload.as_slice()),
+                                    ratchet_used: false,
+                                });
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    }
+                }
+            });
+        }
+
+        Self {
+            name,
+            iface_manager,
+            link_in_event_tx,
+            link_out_event_tx,
+            received_data_tx,
+            iface_messages_tx,
+            resource_events_tx,
+            handler,
+            cancel,
+        }
+    }
+
+    pub async fn outbound(&self, packet: &Packet) {
+        let (packet, maybe_iface) = self.handler.lock().await.path_table.handle_packet(packet);
+
+        if let Some(iface) = maybe_iface {
+            self.send_direct(iface, packet).await;
+            log::trace!("Sent outbound packet to {}", iface);
+        }
+        if maybe_iface.is_none() {
+            let handler = self.handler.lock().await;
+            if handler.config.broadcast {
+                handler
+                    .send(TxMessage {
+                        tx_type: TxMessageType::Broadcast(None),
+                        packet,
+                    })
+                    .await;
+            } else {
+                log::trace!(
+                    "tp({}): no route for outbound packet dst={}",
+                    self.name,
+                    packet.destination
+                );
+            }
+        }
+    }
+
+    pub fn iface_manager(&self) -> Arc<Mutex<InterfaceManager>> {
+        self.iface_manager.clone()
+    }
+
+    pub fn iface_rx(&self) -> broadcast::Receiver<RxMessage> {
+        self.iface_messages_tx.subscribe()
+    }
+
+    pub fn resource_events(&self) -> broadcast::Receiver<ResourceEvent> {
+        self.resource_events_tx.subscribe()
+    }
+
+    pub async fn recv_announces(&self) -> broadcast::Receiver<AnnounceEvent> {
+        self.handler.lock().await.announce_tx.subscribe()
+    }
+
+    pub async fn send_packet(&self, packet: Packet) {
+        let mut handler = self.handler.lock().await;
+        handler.send_packet(packet).await;
+    }
+
+    pub async fn send_packet_with_outcome(&self, packet: Packet) -> SendPacketOutcome {
+        let mut handler = self.handler.lock().await;
+        handler.send_packet_with_outcome(packet).await
+    }
+
+    pub async fn send_packet_with_trace(&self, packet: Packet) -> SendPacketTrace {
+        let mut handler = self.handler.lock().await;
+        handler.send_packet_with_trace(packet).await
+    }
+
+    pub async fn send_announce(
+        &self,
+        destination: &Arc<Mutex<SingleInputDestination>>,
+        app_data: Option<&[u8]>,
+    ) {
+        let mut destination = destination.lock().await;
+        let packet = destination
+            .announce(OsRng, app_data)
+            .expect("valid announce packet");
+        let mut handler = self.handler.lock().await;
+        handler.send_packet(packet).await;
+    }
+
+    pub async fn set_receipt_handler(&mut self, handler: Box<dyn ReceiptHandler>) {
+        self.handler.lock().await.receipt_handler = Some(Arc::from(handler));
+    }
+
+    pub fn emit_receipt_for_test(&self, receipt: DeliveryReceipt) {
+        let receipt_handler = self
+            .handler
+            .try_lock()
+            .ok()
+            .and_then(|handler| handler.receipt_handler.clone());
+
+        if let Some(handler) = receipt_handler {
+            handler.on_receipt(&receipt);
+        }
+    }
+
+    pub async fn handle_inbound_for_test(&self, packet: Packet) {
+        let (receipt, receipt_handler) = {
+            let mut handler = self.handler.lock().await;
+            let receipt = handle_inbound_packet_for_test(&packet, &mut handler);
+            let receipt_handler = handler.receipt_handler.clone();
+            (receipt, receipt_handler)
+        };
+
+        if let (Some(receipt), Some(handler)) = (receipt, receipt_handler) {
+            handler.on_receipt(&receipt);
+        }
+    }
+
+    pub async fn send_broadcast(&self, packet: Packet, from_iface: Option<AddressHash>) {
+        self.handler
+            .lock()
+            .await
+            .send(TxMessage {
+                tx_type: TxMessageType::Broadcast(from_iface),
+                packet,
+            })
+            .await;
+    }
+
+    pub async fn send_direct(&self, addr: AddressHash, packet: Packet) {
+        self.handler
+            .lock()
+            .await
+            .send(TxMessage {
+                tx_type: TxMessageType::Direct(addr),
+                packet,
+            })
+            .await;
+    }
+
+    pub async fn send_to_all_out_links(&self, payload: &[u8]) {
+        let packets = {
+            let handler = self.handler.lock().await;
+            let mut packets = Vec::new();
+            for link in handler.out_links.values() {
+                let link = link.lock().await;
+                if link.status() == LinkStatus::Active {
+                    if let Ok(packet) = link.data_packet(payload) {
+                        packets.push(packet);
+                    }
+                }
+            }
+            packets
+        };
+        if packets.is_empty() {
+            return;
+        }
+        let mut handler = self.handler.lock().await;
+        for packet in packets {
+            handler.send_packet(packet).await;
+        }
+    }
+
+    pub async fn send_to_out_links(&self, destination: &AddressHash, payload: &[u8]) {
+        let mut count = 0usize;
+        let packets = {
+            let handler = self.handler.lock().await;
+            let mut packets = Vec::new();
+            for link in handler.out_links.values() {
+                let link = link.lock().await;
+                if link.destination().address_hash == *destination
+                    && link.status() == LinkStatus::Active
+                {
+                    if let Ok(packet) = link.data_packet(payload) {
+                        packets.push(packet);
+                    }
+                }
+            }
+            packets
+        };
+        if !packets.is_empty() {
+            let mut handler = self.handler.lock().await;
+            for packet in packets {
+                handler.send_packet(packet).await;
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            log::trace!(
+                "tp({}): no output links for {} destination",
+                self.name,
+                destination
+            );
+        }
+    }
+
+    pub async fn send_to_in_links(&self, destination: &AddressHash, payload: &[u8]) {
+        let mut count = 0usize;
+        let packets = {
+            let handler = self.handler.lock().await;
+            let mut packets = Vec::new();
+            for link in handler.in_links.values() {
+                let link = link.lock().await;
+
+                if link.destination().address_hash == *destination
+                    && link.status() == LinkStatus::Active
+                {
+                    if let Ok(packet) = link.data_packet(payload) {
+                        packets.push(packet);
+                    }
+                }
+            }
+            packets
+        };
+        if !packets.is_empty() {
+            let mut handler = self.handler.lock().await;
+            for packet in packets {
+                handler.send_packet(packet).await;
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            log::trace!(
+                "tp({}): no input links for {} destination",
+                self.name,
+                destination
+            );
+        }
+    }
+
+    pub async fn send_resource(
+        &self,
+        link_id: &AddressHash,
+        data: Vec<u8>,
+        metadata: Option<Vec<u8>>,
+    ) -> Result<Hash, RnsError> {
+        let (out_links, in_link) = {
+            let handler = self.handler.lock().await;
+            (
+                handler.out_links.values().cloned().collect::<Vec<_>>(),
+                handler.in_links.get(link_id).cloned(),
+            )
+        };
+
+        let link = if let Some(link) = in_link {
+            Some(link)
+        } else {
+            let mut found = None;
+            for link in out_links {
+                if *link.lock().await.id() == *link_id {
+                    found = Some(link);
+                    break;
+                }
+            }
+            found
+        };
+
+        let link = link.ok_or(RnsError::InvalidArgument)?;
+        let mut handler = self.handler.lock().await;
+        let link_guard = link.lock().await;
+        let (resource_hash, packet) =
+            handler
+                .resource_manager
+                .start_send(&link_guard, data, metadata)?;
+        drop(link_guard);
+        handler.send_packet(packet).await;
+        Ok(resource_hash)
+    }
+
+    pub async fn find_out_link(&self, link_id: &AddressHash) -> Option<Arc<Mutex<Link>>> {
+        let links = {
+            let handler = self.handler.lock().await;
+            handler.out_links.values().cloned().collect::<Vec<_>>()
+        };
+        for link in links {
+            if *link.lock().await.id() == *link_id {
+                return Some(link);
+            }
+        }
+        None
+    }
+
+    pub async fn find_in_link(&self, link_id: &AddressHash) -> Option<Arc<Mutex<Link>>> {
+        self.handler.lock().await.in_links.get(link_id).cloned()
+    }
+
+    pub async fn link(&self, destination: DestinationDesc) -> Arc<Mutex<Link>> {
+        let link = self
+            .handler
+            .lock()
+            .await
+            .out_links
+            .get(&destination.address_hash)
+            .cloned();
+
+        if let Some(link) = link {
+            if link.lock().await.status() != LinkStatus::Closed {
+                return link;
+            } else {
+                log::warn!("tp({}): link was closed", self.name);
+            }
+        }
+
+        let mut link = Link::new(destination, self.link_out_event_tx.clone());
+
+        let packet = link.request();
+
+        log::debug!(
+            "tp({}): create new link {} for destination {}",
+            self.name,
+            link.id(),
+            destination
+        );
+
+        let link = Arc::new(Mutex::new(link));
+
+        self.send_packet(packet).await;
+
+        self.handler
+            .lock()
+            .await
+            .out_links
+            .insert(destination.address_hash, link.clone());
+
+        link
+    }
+
+    pub async fn request_path(
+        &self,
+        destination: &AddressHash,
+        on_iface: Option<AddressHash>,
+        tag: Option<TagBytes>,
+    ) {
+        self.handler
+            .lock()
+            .await
+            .request_path(destination, on_iface, tag)
+            .await
+    }
+
+    pub fn out_link_events(&self) -> broadcast::Receiver<LinkEventData> {
+        self.link_out_event_tx.subscribe()
+    }
+
+    pub fn in_link_events(&self) -> broadcast::Receiver<LinkEventData> {
+        self.link_in_event_tx.subscribe()
+    }
+
+    pub fn received_data_events(&self) -> broadcast::Receiver<ReceivedData> {
+        self.received_data_tx.subscribe()
+    }
+
+    pub async fn add_destination(
+        &mut self,
+        identity: PrivateIdentity,
+        name: DestinationName,
+    ) -> Arc<Mutex<SingleInputDestination>> {
+        let destination = SingleInputDestination::new(identity, name);
+        let address_hash = destination.desc.address_hash;
+
+        log::debug!("tp({}): add destination {}", self.name, address_hash);
+
+        let destination = Arc::new(Mutex::new(destination));
+
+        self.handler
+            .lock()
+            .await
+            .single_in_destinations
+            .insert(address_hash, destination.clone());
+
+        destination
+    }
+
+    pub async fn has_destination(&self, address: &AddressHash) -> bool {
+        self.handler.lock().await.has_destination(address)
+    }
+
+    pub async fn knows_destination(&self, address: &AddressHash) -> bool {
+        self.handler.lock().await.knows_destination(address)
+    }
+
+    pub async fn destination_identity(&self, address: &AddressHash) -> Option<Identity> {
+        let destination = {
+            self.handler
+                .lock()
+                .await
+                .single_out_destinations
+                .get(address)
+                .cloned()
+        }?;
+        let destination = destination.lock().await;
+        Some(destination.identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_handler(&self) -> Arc<Mutex<TransportHandler>> {
+        // direct access to handler for testing purposes
+        self.handler.clone()
+    }
+}
+
+impl Drop for Transport {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+impl TransportHandler {
+    async fn send_packet(&mut self, packet: Packet) {
+        let _ = self.send_packet_with_trace(packet).await;
+    }
+
+    async fn send_packet_with_outcome(&mut self, packet: Packet) -> SendPacketOutcome {
+        self.send_packet_with_trace(packet).await.outcome
+    }
+
+    async fn send_packet_with_trace(&mut self, mut packet: Packet) -> SendPacketTrace {
+        if packet.header.packet_type == PacketType::Proof {
+            eprintln!(
+                "[tp] send_proof dst={} ctx={:02x}",
+                packet.destination, packet.context as u8
+            );
+            if packet.context == PacketContext::LinkRequestProof {
+                if let Ok(raw) = packet.to_bytes() {
+                    eprintln!(
+                        "[tp] lrproof_raw len={} hex={}",
+                        raw.len(),
+                        bytes_to_hex(&raw)
+                    );
+                }
+            }
+        }
+        if should_encrypt_packet(&packet) {
+            let destination = self
+                .single_out_destinations
+                .get(&packet.destination)
+                .cloned();
+            let Some(destination) = destination else {
+                log::warn!(
+                    "tp({}): missing destination identity for {}",
+                    self.config.name,
+                    packet.destination
+                );
+                return SendPacketTrace {
+                    outcome: SendPacketOutcome::DroppedMissingDestinationIdentity,
+                    direct_iface: None,
+                    broadcast: false,
+                };
+            };
+            let identity = destination.lock().await.identity;
+            let salt = identity.address_hash.as_slice();
+            let ratchet = self
+                .ratchet_store
+                .as_mut()
+                .and_then(|store| store.get(&packet.destination));
+            let public_key = ratchet.map(PublicKey::from).unwrap_or(identity.public_key);
+            match encrypt_for_public_key(&public_key, salt, packet.data.as_slice(), OsRng) {
+                Ok(ciphertext) => {
+                    let mut buffer = PacketDataBuffer::new();
+                    if buffer.write(&ciphertext).is_err() {
+                        log::warn!(
+                            "tp({}): ciphertext too large for packet to {}",
+                            self.config.name,
+                            packet.destination
+                        );
+                        return SendPacketTrace {
+                            outcome: SendPacketOutcome::DroppedCiphertextTooLarge,
+                            direct_iface: None,
+                            broadcast: false,
+                        };
+                    }
+                    packet.data = buffer;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "tp({}): encrypt failed for {}: {:?}",
+                        self.config.name,
+                        packet.destination,
+                        err
+                    );
+                    return SendPacketTrace {
+                        outcome: SendPacketOutcome::DroppedEncryptFailed,
+                        direct_iface: None,
+                        broadcast: false,
+                    };
+                }
+            }
+        }
+
+        let (packet, maybe_iface) = self.path_table.handle_packet(&packet);
+        if let Some(iface) = maybe_iface {
+            self.send(TxMessage {
+                tx_type: TxMessageType::Direct(iface),
+                packet,
+            })
+            .await;
+            SendPacketTrace {
+                outcome: SendPacketOutcome::SentDirect,
+                direct_iface: Some(iface),
+                broadcast: false,
+            }
+        } else if self.config.broadcast {
+            self.send(TxMessage {
+                tx_type: TxMessageType::Broadcast(None),
+                packet,
+            })
+            .await;
+            SendPacketTrace {
+                outcome: SendPacketOutcome::SentBroadcast,
+                direct_iface: None,
+                broadcast: true,
+            }
+        } else {
+            log::trace!(
+                "tp({}): no route for outbound packet dst={}",
+                self.config.name,
+                packet.destination
+            );
+            SendPacketTrace {
+                outcome: SendPacketOutcome::DroppedNoRoute,
+                direct_iface: None,
+                broadcast: false,
+            }
+        }
+    }
+
+    async fn send(&self, message: TxMessage) {
+        self.packet_cache.lock().await.update(&message.packet);
+        self.iface_manager.lock().await.send(message).await;
+    }
+
+    fn has_destination(&self, address: &AddressHash) -> bool {
+        self.single_in_destinations.contains_key(address)
+    }
+
+    fn knows_destination(&self, address: &AddressHash) -> bool {
+        self.single_out_destinations.contains_key(address)
+    }
+
+    async fn filter_duplicate_packets(&self, packet: &Packet) -> bool {
+        let mut allow_duplicate = false;
+
+        match packet.header.packet_type {
+            PacketType::Announce => {
+                return true;
+            }
+            PacketType::LinkRequest => {
+                allow_duplicate = true;
+            }
+            PacketType::Data => {
+                allow_duplicate = packet.context == PacketContext::KeepAlive;
+            }
+            PacketType::Proof => {
+                if packet.context == PacketContext::LinkRequestProof {
+                    if let Some(link) = self.in_links.get(&packet.destination) {
+                        if link.lock().await.status().not_yet_active() {
+                            allow_duplicate = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let is_new = self.packet_cache.lock().await.update(packet);
+
+        is_new || allow_duplicate
+    }
+
+    async fn request_path(
+        &mut self,
+        address: &AddressHash,
+        on_iface: Option<AddressHash>,
+        tag: Option<TagBytes>,
+    ) {
+        let packet = self.path_requests.generate(address, tag);
+
+        self.send(TxMessage {
+            tx_type: TxMessageType::Broadcast(on_iface),
+            packet,
+        })
+        .await;
+    }
+}
+
+async fn handle_proof(packet: Packet, handler: Arc<Mutex<TransportHandler>>) {
+    if packet.context == PacketContext::ResourceProof
+        && packet.header.destination_type == DestinationType::Link
+    {
+        let mut handler = handler.lock().await;
+        let mut link = handler
+            .in_links
+            .get(&packet.destination)
+            .cloned()
+            .or_else(|| handler.out_links.get(&packet.destination).cloned());
+        if link.is_none() {
+            for candidate in handler.out_links.values() {
+                if *candidate.lock().await.id() == packet.destination {
+                    link = Some(candidate.clone());
+                    break;
+                }
+            }
+        }
+        if let Some(link) = link {
+            let mut link = link.lock().await;
+            let responses = handler.resource_manager.handle_packet(&packet, &mut link);
+            let events = handler.resource_manager.drain_events();
+            drop(link);
+            for response in responses {
+                handler.send_packet(response).await;
+            }
+            for event in events {
+                let _ = handler.resource_events_tx.send(event);
+            }
+        }
+        return;
+    }
+    eprintln!(
+        "[tp] proof dst={} ctx={:02x}",
+        packet.destination, packet.context as u8
+    );
+    let receipt_hash =
+        if packet.context != PacketContext::LinkRequestProof && packet.data.len() >= HASH_SIZE {
+            let mut hash = [0u8; HASH_SIZE];
+            hash.copy_from_slice(&packet.data.as_slice()[..HASH_SIZE]);
+            Some(hash)
+        } else {
+            None
+        };
+    if let Some(receipt_hash) = receipt_hash {
+        let receipt = DeliveryReceipt::new(receipt_hash);
+        let receipt_handler = {
+            let handler = handler.lock().await;
+            log::trace!(
+                "tp({}): handle proof for {}",
+                handler.config.name,
+                packet.destination
+            );
+            handler.receipt_handler.clone()
+        };
+
+        if let Some(receipt_handler) = receipt_handler {
+            receipt_handler.on_receipt(&receipt);
+        }
+    }
+
+    let mut handler = handler.lock().await;
+
+    let mut rtt_packets = Vec::new();
+    for link in handler.out_links.values() {
+        let mut link = link.lock().await;
+        if let LinkHandleResult::Activated = link.handle_packet(&packet) {
+            rtt_packets.push(link.create_rtt());
+        }
+    }
+    for packet in rtt_packets {
+        handler.send_packet(packet).await;
+    }
+
+    let maybe_packet = handler.link_table.handle_proof(&packet);
+
+    if let Some((packet, iface)) = maybe_packet {
+        handler
+            .send(TxMessage {
+                tx_type: TxMessageType::Direct(iface),
+                packet,
+            })
+            .await;
+    }
+}
+
+fn handle_inbound_packet_for_test(
+    packet: &Packet,
+    _handler: &mut MutexGuard<'_, TransportHandler>,
+) -> Option<DeliveryReceipt> {
+    match packet.header.packet_type {
+        PacketType::Proof => {
+            if packet.context != PacketContext::LinkRequestProof && packet.data.len() >= HASH_SIZE {
+                let mut hash = [0u8; HASH_SIZE];
+                hash.copy_from_slice(&packet.data.as_slice()[..HASH_SIZE]);
+                Some(DeliveryReceipt::new(hash))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+async fn send_to_next_hop<'a>(
+    packet: &Packet,
+    handler: &MutexGuard<'a, TransportHandler>,
+    lookup: Option<AddressHash>,
+) -> bool {
+    let (packet, maybe_iface) = handler.path_table.handle_inbound_packet(packet, lookup);
+
+    if let Some(iface) = maybe_iface {
+        handler
+            .send(TxMessage {
+                tx_type: TxMessageType::Direct(iface),
+                packet,
+            })
+            .await;
+    }
+
+    maybe_iface.is_some()
+}
+
+async fn handle_keepalive_response<'a>(
+    packet: &Packet,
+    handler: &mut MutexGuard<'a, TransportHandler>,
+) -> bool {
+    if packet.context == PacketContext::KeepAlive
+        && packet.data.as_slice()[0] == KEEP_ALIVE_RESPONSE
+    {
+        let lookup = handler.link_table.handle_keepalive(packet);
+
+        if let Some((propagated, iface)) = lookup {
+            handler
+                .send(TxMessage {
+                    tx_type: TxMessageType::Direct(iface),
+                    packet: propagated,
+                })
+                .await;
+        }
+
+        return true;
+    }
+
+    false
+}
+
+fn should_encrypt_packet(packet: &Packet) -> bool {
+    if packet.header.packet_type != PacketType::Data {
+        return false;
+    }
+    if packet.header.destination_type != DestinationType::Single {
+        return false;
+    }
+    !matches!(
+        packet.context,
+        PacketContext::Resource
+            | PacketContext::ResourceAdvrtisement
+            | PacketContext::ResourceRequest
+            | PacketContext::ResourceHashUpdate
+            | PacketContext::ResourceProof
+            | PacketContext::ResourceInitiatorCancel
+            | PacketContext::ResourceReceiverCancel
+            | PacketContext::KeepAlive
+            | PacketContext::CacheRequest
+    )
+}
+
+async fn handle_data<'a>(packet: &Packet, mut handler: MutexGuard<'a, TransportHandler>) {
+    let mut data_handled = false;
+
+    if packet.header.destination_type == DestinationType::Link {
+        if matches!(
+            packet.context,
+            PacketContext::Resource
+                | PacketContext::ResourceAdvrtisement
+                | PacketContext::ResourceRequest
+                | PacketContext::ResourceHashUpdate
+                | PacketContext::ResourceProof
+                | PacketContext::ResourceInitiatorCancel
+                | PacketContext::ResourceReceiverCancel
+        ) {
+            let mut link = handler
+                .in_links
+                .get(&packet.destination)
+                .cloned()
+                .or_else(|| handler.out_links.get(&packet.destination).cloned());
+            if link.is_none() {
+                for candidate in handler.out_links.values() {
+                    if *candidate.lock().await.id() == packet.destination {
+                        link = Some(candidate.clone());
+                        break;
+                    }
+                }
+            }
+
+            if let Some(link) = link {
+                let mut link = link.lock().await;
+                let needs_decrypt = matches!(
+                    packet.context,
+                    PacketContext::ResourceAdvrtisement
+                        | PacketContext::ResourceRequest
+                        | PacketContext::ResourceHashUpdate
+                        | PacketContext::ResourceInitiatorCancel
+                        | PacketContext::ResourceReceiverCancel
+                );
+                let packet_for_manager = if needs_decrypt {
+                    let mut buffer = PacketDataBuffer::new();
+                    let plain_len =
+                        match link.decrypt(packet.data.as_slice(), buffer.accuire_buf_max()) {
+                            Ok(plain) => plain.len(),
+                            Err(err) => {
+                                log::warn!("resource: failed to decrypt packet: {:?}", err);
+                                return;
+                            }
+                        };
+                    buffer.resize(plain_len);
+                    let mut plain_packet = *packet;
+                    plain_packet.data = buffer;
+                    plain_packet
+                } else {
+                    *packet
+                };
+                let responses = handler
+                    .resource_manager
+                    .handle_packet(&packet_for_manager, &mut link);
+                let events = handler.resource_manager.drain_events();
+                drop(link);
+                for response in responses {
+                    handler.send_packet(response).await;
+                }
+                for event in events {
+                    let _ = handler.resource_events_tx.send(event);
+                }
+                return;
+            }
+        }
+
+        eprintln!(
+            "[tp] link_data dst={} ctx={:02x} len={}",
+            packet.destination,
+            packet.context as u8,
+            packet.data.len()
+        );
+        let mut link_packets = Vec::new();
+        if let Some(link) = handler.in_links.get(&packet.destination).cloned() {
+            let mut link = link.lock().await;
+            let result = link.handle_packet(packet);
+            if let LinkHandleResult::KeepAlive = result {
+                link_packets.push(link.keep_alive_packet(KEEP_ALIVE_RESPONSE));
+            } else if let LinkHandleResult::Proof(proof_packet) = result {
+                link_packets.push(proof_packet);
+            }
+        }
+
+        let mut proof_packets = Vec::new();
+        for link in handler.out_links.values() {
+            let mut link = link.lock().await;
+            let result = link.handle_packet(packet);
+            if let LinkHandleResult::Proof(proof_packet) = result {
+                proof_packets.push(proof_packet);
+            }
+            data_handled = true;
+        }
+
+        for packet in link_packets {
+            handler.send_packet(packet).await;
+        }
+        for packet in proof_packets {
+            handler.send_packet(packet).await;
+        }
+
+        if handle_keepalive_response(packet, &mut handler).await {
+            return;
+        }
+
+        let lookup = handler.link_table.original_destination(&packet.destination);
+        if lookup.is_some() {
+            let sent = send_to_next_hop(packet, &handler, lookup).await;
+
+            log::trace!(
+                "tp({}): {} packet to remote link {}",
+                handler.config.name,
+                if sent {
+                    "forwarded"
+                } else {
+                    "could not forward"
+                },
+                packet.destination
+            );
+        }
+    }
+
+    if packet.header.destination_type == DestinationType::Single {
+        if let Some(destination) = handler
+            .single_in_destinations
+            .get(&packet.destination)
+            .cloned()
+        {
+            data_handled = true;
+            let mut ratchet_used = false;
+            let payload = if should_encrypt_packet(packet) {
+                let mut destination = destination.lock().await;
+                match destination.decrypt_with_ratchets(packet.data.as_slice()) {
+                    Ok((plaintext, used)) => {
+                        ratchet_used = used;
+                        plaintext
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "tp({}): decrypt failed for {}: {:?}",
+                            handler.config.name,
+                            packet.destination,
+                            err
+                        );
+                        return;
+                    }
+                }
+            } else {
+                packet.data.as_slice().to_vec()
+            };
+            let mut buffer = PacketDataBuffer::new();
+            if buffer.write(&payload).is_err() {
+                log::warn!(
+                    "tp({}): decrypted payload too large for {}",
+                    handler.config.name,
+                    packet.destination
+                );
+                return;
+            }
+            handler
+                .received_data_tx
+                .send(ReceivedData {
+                    destination: packet.destination,
+                    data: buffer,
+                    ratchet_used,
+                })
+                .ok();
+        } else {
+            data_handled = send_to_next_hop(packet, &handler, None).await;
+        }
+    }
+
+    if data_handled {
+        log::trace!(
+            "tp({}): handle data request for {} dst={:2x} ctx={:2x}",
+            handler.config.name,
+            packet.destination,
+            packet.header.destination_type as u8,
+            packet.context as u8,
+        );
+    }
+}
+
+async fn handle_announce<'a>(
+    packet: &Packet,
+    mut handler: MutexGuard<'a, TransportHandler>,
+    iface: AddressHash,
+) {
+    if let Some(blocked_until) = handler.announce_limits.check(&packet.destination) {
+        log::info!(
+            "tp({}): too many announces from {}, blocked for {} seconds",
+            handler.config.name,
+            &packet.destination,
+            blocked_until.as_secs(),
+        );
+        return;
+    }
+
+    let destination_known = handler.has_destination(&packet.destination);
+
+    let announce = match DestinationAnnounce::validate(packet) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!(
+                "[transport] announce validate failed dst={} err={:?}",
+                packet.destination, err
+            );
+            return;
+        }
+    };
+    let ratchet = announce.ratchet;
+    if let Some(ratchet_bytes) = ratchet {
+        if let Some(store) = handler.ratchet_store.as_mut() {
+            if let Err(err) = store.remember(&packet.destination, ratchet_bytes) {
+                log::warn!(
+                    "tp({}): failed to remember ratchet for {}: {:?}",
+                    handler.config.name,
+                    packet.destination,
+                    err
+                );
+            }
+        }
+    }
+    // Retransmit/path bookkeeping must use the announced destination hash,
+    // not the bare identity hash, otherwise peers learn only identity routes
+    // and cannot resolve application destinations like `lxmf.delivery`.
+    let dest_hash = announce.destination.desc.address_hash;
+    let destination = Arc::new(Mutex::new(announce.destination));
+
+    if !destination_known {
+        if !handler
+            .single_out_destinations
+            .contains_key(&packet.destination)
+        {
+            log::trace!(
+                "tp({}): new announce for {}",
+                handler.config.name,
+                packet.destination
+            );
+
+            handler
+                .single_out_destinations
+                .insert(packet.destination, destination.clone());
+        }
+
+        handler.announce_table.add(packet, dest_hash, iface);
+
+        handler
+            .path_table
+            .handle_announce(packet, packet.transport, iface);
+    }
+
+    let retransmit = handler.config.retransmit;
+    if retransmit {
+        let transport_id = *handler.config.identity.address_hash();
+        if let Some(message) = handler.announce_table.new_packet(&dest_hash, &transport_id) {
+            handler.send(message).await;
+        }
+    }
+
+    let _ = handler.announce_tx.send(AnnounceEvent {
+        destination,
+        app_data: PacketDataBuffer::new_from_slice(announce.app_data),
+        ratchet,
+    });
+}
+
+async fn handle_path_request<'a>(
+    packet: &Packet,
+    handler: &mut MutexGuard<'a, TransportHandler>,
+    iface: AddressHash,
+) {
+    if let Some(request) = handler.path_requests.decode(packet.data.as_slice()) {
+        eprintln!(
+            "[tp] path_request dest={} iface={}",
+            request.destination, iface
+        );
+        if let Some(dest) = handler.single_in_destinations.get(&request.destination) {
+            let response = dest
+                .lock()
+                .await
+                .path_response(OsRng, None)
+                .expect("valid path response");
+
+            handler
+                .send(TxMessage {
+                    tx_type: TxMessageType::Direct(iface),
+                    packet: response,
+                })
+                .await;
+            eprintln!(
+                "[tp] path_response dest={} iface={}",
+                request.destination, iface
+            );
+
+            log::trace!(
+                "tp({}): send direct path response over {}",
+                handler.config.name,
+                iface
+            );
+
+            return;
+        }
+
+        if handler.config.retransmit {
+            if let Some(entry) = handler.path_table.get(&request.destination) {
+                if let Some(requestor_id) = request.requesting_transport {
+                    if requestor_id == entry.received_from {
+                        log::trace!(
+                            "tp({}): dropping circular path request from {}",
+                            handler.config.name,
+                            request.destination
+                        );
+                        return;
+                    }
+                }
+
+                let hops = entry.hops;
+
+                handler
+                    .announce_table
+                    .add_response(request.destination, iface, hops);
+
+                log::trace!(
+                    "tp({}): scheduled remote path response to {} ({} hops) over {}",
+                    handler.config.name,
+                    request.destination,
+                    hops,
+                    iface
+                );
+
+                return;
+            }
+        }
+
+        if let Some(packet) =
+            handler
+                .path_requests
+                .generate_recursive(&request.destination, Some(iface), None)
+        {
+            handler
+                .send(TxMessage {
+                    tx_type: TxMessageType::Broadcast(Some(iface)),
+                    packet,
+                })
+                .await;
+        }
+    }
+}
+
+async fn handle_fixed_destinations<'a>(
+    packet: &Packet,
+    handler: &mut MutexGuard<'a, TransportHandler>,
+    iface: AddressHash,
+) -> bool {
+    if packet.destination == handler.fixed_dest_path_requests {
+        handle_path_request(packet, handler, iface).await;
+        true
+    } else {
+        false
+    }
+}
+
+async fn handle_link_request_as_destination<'a>(
+    destination: Arc<Mutex<SingleInputDestination>>,
+    packet: &Packet,
+    mut handler: MutexGuard<'a, TransportHandler>,
+) {
+    let mut destination = destination.lock().await;
+    match destination.handle_packet(packet) {
+        DestinationHandleStatus::LinkProof => {
+            let link_id = LinkId::from(packet);
+            if !handler.in_links.contains_key(&link_id) {
+                log::trace!(
+                    "tp({}): send proof to {}",
+                    handler.config.name,
+                    packet.destination
+                );
+
+                let link = Link::new_from_request(
+                    packet,
+                    destination.sign_key().clone(),
+                    destination.desc,
+                    handler.link_in_event_tx.clone(),
+                );
+
+                if let Ok(mut link) = link {
+                    eprintln!(
+                        "[tp] link_proof_tx dst={} link_id={}",
+                        packet.destination,
+                        link.id()
+                    );
+                    handler.send_packet(link.prove()).await;
+
+                    log::debug!(
+                        "tp({}): save input link {} for destination {}",
+                        handler.config.name,
+                        link.id(),
+                        link.destination().address_hash
+                    );
+
+                    handler
+                        .in_links
+                        .insert(*link.id(), Arc::new(Mutex::new(link)));
+                }
+            }
+        }
+        DestinationHandleStatus::None => {}
+    }
+}
+
+async fn handle_link_request_as_intermediate<'a>(
+    received_from: AddressHash,
+    next_hop: AddressHash,
+    next_hop_iface: AddressHash,
+    packet: &Packet,
+    mut handler: MutexGuard<'a, TransportHandler>,
+) {
+    handler.link_table.add(
+        packet,
+        packet.destination,
+        received_from,
+        next_hop,
+        next_hop_iface,
+    );
+
+    send_to_next_hop(packet, &handler, None).await;
+}
+
+async fn handle_link_request<'a>(
+    packet: &Packet,
+    iface: AddressHash,
+    handler: MutexGuard<'a, TransportHandler>,
+) {
+    eprintln!(
+        "[tp] link_request dst={} ctx={:02x} hops={}",
+        packet.destination, packet.context as u8, packet.header.hops
+    );
+    if let Some(destination) = handler
+        .single_in_destinations
+        .get(&packet.destination)
+        .cloned()
+    {
+        log::trace!(
+            "tp({}): handle link request for {}",
+            handler.config.name,
+            packet.destination
+        );
+
+        handle_link_request_as_destination(destination, packet, handler).await;
+    } else if let Some(entry) = handler.path_table.next_hop_full(&packet.destination) {
+        log::trace!(
+            "tp({}): handle link request for remote destination {}",
+            handler.config.name,
+            packet.destination
+        );
+
+        let (next_hop, next_iface) = entry;
+        handle_link_request_as_intermediate(iface, next_hop, next_iface, packet, handler).await;
+    } else {
+        log::trace!(
+            "tp({}): dropping link request to unknown destination {}",
+            handler.config.name,
+            packet.destination
+        );
+    }
+}
+
+async fn handle_check_links<'a>(mut handler: MutexGuard<'a, TransportHandler>) {
+    let mut links_to_remove: Vec<AddressHash> = Vec::new();
+    let mut pending_packets: Vec<Packet> = Vec::new();
+
+    // Clean up input links
+    for link_entry in &handler.in_links {
+        let mut link = link_entry.1.lock().await;
+        if link.elapsed() > INTERVAL_INPUT_LINK_CLEANUP {
+            link.close();
+            links_to_remove.push(*link_entry.0);
+        }
+    }
+
+    for addr in &links_to_remove {
+        handler.in_links.remove(addr);
+    }
+
+    links_to_remove.clear();
+
+    for link_entry in &handler.out_links {
+        let mut link = link_entry.1.lock().await;
+        if link.status() == LinkStatus::Closed {
+            link.close();
+            links_to_remove.push(*link_entry.0);
+        }
+    }
+
+    for addr in &links_to_remove {
+        handler.out_links.remove(addr);
+    }
+
+    for link_entry in &handler.out_links {
+        let mut link = link_entry.1.lock().await;
+
+        if link.status() == LinkStatus::Active && link.elapsed() > INTERVAL_OUTPUT_LINK_RESTART {
+            link.restart();
+        }
+
+        if link.status() == LinkStatus::Pending && link.elapsed() > INTERVAL_OUTPUT_LINK_REPEAT {
+            log::warn!(
+                "tp({}): repeat link request {}",
+                handler.config.name,
+                link.id()
+            );
+            pending_packets.push(link.request());
+        }
+    }
+
+    for packet in pending_packets {
+        handler.send_packet(packet).await;
+    }
+}
+
+async fn handle_keep_links<'a>(mut handler: MutexGuard<'a, TransportHandler>) {
+    let mut packets = Vec::new();
+    for link in handler.out_links.values() {
+        let link = link.lock().await;
+
+        if link.status() == LinkStatus::Active {
+            packets.push(link.keep_alive_packet(KEEP_ALIVE_REQUEST));
+        }
+    }
+    for packet in packets {
+        handler.send_packet(packet).await;
+    }
+}
+
+async fn handle_cleanup<'a>(handler: MutexGuard<'a, TransportHandler>) {
+    handler.iface_manager.lock().await.cleanup();
+}
+
+async fn retransmit_announces<'a>(mut handler: MutexGuard<'a, TransportHandler>) {
+    let transport_id = *handler.config.identity.address_hash();
+    let messages = handler.announce_table.to_retransmit(&transport_id);
+
+    for message in messages {
+        handler.send(message).await;
+    }
+}
+
+async fn manage_transport(
+    handler_arc: Arc<Mutex<TransportHandler>>,
+    rx_receiver: Arc<Mutex<InterfaceRxReceiver>>,
+    iface_messages_tx: broadcast::Sender<RxMessage>,
+) {
+    let cancel = handler_arc.lock().await.cancel.clone();
+    let retransmit = handler_arc.lock().await.config.retransmit;
+
+    let _packet_task = {
+        let handler_arc = handler_arc.clone();
+        let cancel = cancel.clone();
+
+        log::trace!(
+            "tp({}): start packet task",
+            handler_arc.lock().await.config.name
+        );
+
+        tokio::spawn(async move {
+            loop {
+                let mut rx_receiver = rx_receiver.lock().await;
+
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    Some(message) = rx_receiver.recv() => {
+                        let _ = iface_messages_tx.send(message);
+
+                        let packet = message.packet;
+
+                        let mut handler = handler_arc.lock().await;
+
+                        if PACKET_TRACE {
+                            log::debug!("tp: << rx({}) = {} {}", message.address, packet, packet.hash());
+                        }
+
+                        if handle_fixed_destinations(
+                            &packet,
+                            &mut handler,
+                            message.address
+                        ).await {
+                            continue;
+                        }
+
+                        if !handler.filter_duplicate_packets(&packet).await {
+                            log::debug!(
+                                "tp({}): dropping duplicate packet: dst={}, ctx={:?}, type={:?}",
+                                handler.config.name,
+                                packet.destination,
+                                packet.context,
+                                packet.header.packet_type
+                            );
+                            continue;
+                        }
+
+                        if handler.config.broadcast {
+                            handler
+                                .send(TxMessage {
+                                    tx_type: TxMessageType::Broadcast(Some(message.address)),
+                                    packet,
+                                })
+                                .await;
+                        }
+
+                        match packet.header.packet_type {
+                            PacketType::Announce => handle_announce(
+                                &packet,
+                                handler,
+                                message.address
+                            ).await,
+                            PacketType::LinkRequest => handle_link_request(
+                                &packet,
+                                message.address,
+                                handler
+                            ).await,
+                            PacketType::Proof => {
+                                drop(handler);
+                                handle_proof(packet, handler_arc.clone()).await;
+                            }
+                            PacketType::Data => handle_data(&packet, handler).await,
+                        }
+                    }
+                };
+            }
+        })
+    };
+
+    {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(INTERVAL_LINKS_CHECK) => {
+                        handle_check_links(handler.lock().await).await;
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(INTERVAL_OUTPUT_LINK_KEEP) => {
+                        handle_keep_links(handler.lock().await).await;
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(INTERVAL_IFACE_CLEANUP) => {
+                        handle_cleanup(handler.lock().await).await;
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(INTERVAL_PACKET_CACHE_CLEANUP) => {
+                        let mut handler = handler.lock().await;
+
+                        handler
+                            .packet_cache
+                            .lock()
+                            .await
+                            .release(INTERVAL_KEEP_PACKET_CACHED);
+
+                        handler.link_table.remove_stale();
+                    },
+                }
+            }
+        });
+    }
+
+    if retransmit {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(INTERVAL_ANNOUNCES_RETRANSMIT) => {
+                        retransmit_announces(handler.lock().await).await;
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let handler = handler_arc.clone();
+        let cancel = cancel.clone();
+        let retry_interval = Duration::from_secs(
+            handler_arc
+                .lock()
+                .await
+                .config
+                .resource_retry_interval_secs
+                .max(1),
+        );
+
+        tokio::spawn(async move {
+            loop {
+                if cancel.is_cancelled() {
+                    break;
+                }
+
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        break;
+                    },
+                    _ = time::sleep(retry_interval) => {
+                        let mut handler = handler.lock().await;
+                        let now = Instant::now();
+                        let requests = handler.resource_manager.retry_requests(now);
+                        for (link_id, request) in requests {
+                            let link = handler
+                                .in_links
+                                .get(&link_id)
+                                .cloned()
+                                .or_else(|| handler.out_links.get(&link_id).cloned());
+                            if let Some(link) = link {
+                                let link_guard = link.lock().await;
+                                let packet = build_resource_request_packet(&link_guard, &request);
+                                drop(link_guard);
+                                handler.send_packet(packet).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::destination::link::{LinkEvent, LinkEventData, LinkPayload};
+    use crate::destination::{DestinationName, SingleInputDestination};
+    use crate::identity::PrivateIdentity;
+    use crate::packet::{Header, HeaderType};
+    use rand_core::OsRng;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn link_payload_is_forwarded_to_received_data() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let config = TransportConfig::new("test", &identity, true);
+        let transport = Transport::new(config);
+
+        let mut rx = transport.received_data_events();
+
+        let address_hash = AddressHash::new_from_rand(OsRng);
+        let payload = LinkPayload::new_from_slice(b"hello");
+
+        let _ = transport.link_in_event_tx.send(LinkEventData {
+            id: AddressHash::new_from_rand(OsRng),
+            address_hash,
+            event: LinkEvent::Data(Box::new(payload)),
+        });
+
+        let received = timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("expected forwarded payload")
+            .expect("broadcast receive");
+
+        assert_eq!(received.destination, address_hash);
+        assert_eq!(received.data.as_slice(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn drop_duplicates() {
+        let mut config: TransportConfig = Default::default();
+        config.set_retransmit(true);
+
+        let transport = Transport::new(config);
+        let handler = transport.get_handler();
+
+        let _source1 = AddressHash::new_from_slice(&[1u8; 32]);
+        let _source2 = AddressHash::new_from_slice(&[2u8; 32]);
+        let next_hop_iface = AddressHash::new_from_slice(&[3u8; 32]);
+        let destination = AddressHash::new_from_slice(&[4u8; 32]);
+
+        let mut announce: Packet = Default::default();
+        announce.header.header_type = HeaderType::Type2;
+        announce.header.packet_type = PacketType::Announce;
+        announce.header.hops = 3;
+        announce.transport = Some(destination);
+
+        assert!(
+            handler
+                .lock()
+                .await
+                .filter_duplicate_packets(&announce)
+                .await
+        );
+
+        handle_announce(&announce, handler.lock().await, next_hop_iface).await;
+
+        let data_packet: Packet = Packet {
+            data: PacketDataBuffer::new_from_slice(b"foo"),
+            destination,
+            ..Default::default()
+        };
+        let duplicate: Packet = data_packet;
+
+        let mut different_packet = data_packet;
+        different_packet.data = PacketDataBuffer::new_from_slice(b"bar");
+
+        assert!(
+            handler
+                .lock()
+                .await
+                .filter_duplicate_packets(&data_packet)
+                .await
+        );
+        assert!(
+            !handler
+                .lock()
+                .await
+                .filter_duplicate_packets(&duplicate)
+                .await
+        );
+        assert!(
+            handler
+                .lock()
+                .await
+                .filter_duplicate_packets(&different_packet)
+                .await
+        );
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        handler
+            .lock()
+            .await
+            .packet_cache
+            .lock()
+            .await
+            .release(Duration::from_secs(1));
+
+        // Packet should have been removed from cache (stale)
+        assert!(
+            handler
+                .lock()
+                .await
+                .filter_duplicate_packets(&duplicate)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn announce_retransmit_key_uses_destination_hash() {
+        let local_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut config = TransportConfig::new("test", &local_identity, true);
+        config.set_retransmit(true);
+        let transport = Transport::new(config);
+        let handler = transport.get_handler();
+
+        let remote_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut remote_destination =
+            SingleInputDestination::new(remote_identity, DestinationName::new("lxmf", "delivery"));
+        let announce = remote_destination
+            .announce(OsRng, None)
+            .expect("valid announce packet");
+
+        let announced_destination = announce.destination;
+        let announced_identity = *remote_destination.identity.address_hash();
+        assert_ne!(
+            announced_destination, announced_identity,
+            "destination hash must differ from identity hash for named destinations"
+        );
+
+        let iface = AddressHash::new_from_rand(OsRng);
+        handle_announce(&announce, handler.lock().await, iface).await;
+
+        let mut guard = handler.lock().await;
+        let transport_id = *guard.config.identity.address_hash();
+        let keyed_by_destination = guard
+            .announce_table
+            .new_packet(&announced_destination, &transport_id);
+        assert!(
+            keyed_by_destination.is_some(),
+            "announce retransmit should be keyed by destination hash"
+        );
+        let keyed_by_identity = guard
+            .announce_table
+            .new_packet(&announced_identity, &transport_id);
+        assert!(
+            keyed_by_identity.is_none(),
+            "identity hash must not be used as announce retransmit key"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_packet_with_outcome_reports_missing_identity() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let config = TransportConfig::new("test", &identity, true);
+        let transport = Transport::new(config);
+
+        let packet = Packet {
+            destination: AddressHash::new_from_rand(OsRng),
+            ..Default::default()
+        };
+        let outcome = transport.send_packet_with_outcome(packet).await;
+
+        assert_eq!(
+            outcome,
+            SendPacketOutcome::DroppedMissingDestinationIdentity
+        );
+    }
+
+    #[tokio::test]
+    async fn send_packet_with_outcome_reports_no_route() {
+        let identity = PrivateIdentity::new_from_rand(OsRng);
+        let config = TransportConfig::new("test", &identity, false);
+        let transport = Transport::new(config);
+
+        let packet = Packet {
+            header: Header {
+                packet_type: PacketType::Announce,
+                ..Default::default()
+            },
+            destination: AddressHash::new_from_rand(OsRng),
+            ..Default::default()
+        };
+        let outcome = transport.send_packet_with_outcome(packet).await;
+
+        assert_eq!(outcome, SendPacketOutcome::DroppedNoRoute);
+    }
+}
