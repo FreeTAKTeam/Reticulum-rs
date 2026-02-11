@@ -10,7 +10,7 @@ This project is open source and community-owned, focused on bringing Reticulum c
 - Cryptographic mesh networking
 - Identity-based trust and routing primitives
 - Modular architecture for constrained and general-purpose systems
-- Multiple transport options (TCP, serial, Kaonic)
+- Multiple transport options (TCP, serial)
 - Example clients for testing and integration
 
 ## Structure
@@ -29,25 +29,20 @@ Reticulum-rs/
 │   ├── lib.rs
 │   ├── transport.rs
 │   └── packet.rs
-├── proto/               # Protocol definitions (e.g. for Kaonic)
-│   └── kaonic/
-│       └── kaonic.proto
 ├── examples/            # Example clients and servers
-│   ├── kaonic_client.rs
 │   ├── link_client.rs
 │   ├── tcp_client.rs
 │   ├── tcp_server.rs
 │   └── testnet_client.rs
 ├── Cargo.toml           # Crate configuration
 ├── LICENSE              # License (MIT/Apache)
-└── build.rs             
+└── ...
 ````
 ## Getting Started
 
 ### Prerequisites
 
 * Rust (edition 2021+)
-* `protoc` for compiling `.proto` files (if using gRPC/Kaonic modules)
 
 ### Build
 
@@ -60,9 +55,6 @@ cargo build --release
 ```bash
 # TCP client example
 cargo run --example tcp_client
-
-# Kaonic mesh test client
-cargo run --example kaonic_client
 ```
 
 ## License

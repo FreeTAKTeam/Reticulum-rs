@@ -23,10 +23,6 @@ name = "reticulum"
 
 [dependencies]
 
-# Protobuf and gRPC
-tonic = "0.13.0"
-prost = "0.13.5"
-
 # Crypto
 crypto-common = { version = "0.1.6", features = ["rand_core"] }
 aes = "0.8.4"
@@ -65,9 +61,6 @@ default = ["alloc"]
 alloc = []
 fernet-aes128 = []
 cli-tools = ["dep:clap", "dep:tempfile"]
-
-[build-dependencies]
-tonic-build = "0.13.0"
 
 [dev-dependencies]
 tokio = { version = "1.44.2", features = ["test-util"] }
@@ -143,20 +136,8 @@ name = "link_client"
 path = "examples/link_client.rs"
 
 [[example]]
-name = "kaonic_client"
-path = "examples/kaonic_client.rs"
-
-[[example]]
 name = "testnet_client"
 path = "examples/testnet_client.rs"
-
-[[example]]
-name = "kaonic_tcp_mesh"
-path = "examples/kaonic_tcp_mesh.rs"
-
-[[example]]
-name = "kaonic_mesh"
-path = "examples/kaonic_mesh.rs"
 
 [[example]]
 name = "multihop"
