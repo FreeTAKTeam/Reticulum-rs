@@ -1236,7 +1236,8 @@ dependencies = [
 [[package]]
 name = "lxmf"
 version = "0.1.0"
-source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=7dbea035c73be8e2a92a053ac3b75631301a67b7#7dbea035c73be8e2a92a053ac3b75631301a67b7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36fbd22db21c59e54b28ad654e52e899f63c7b753e7d52fcffd2bbe3f5374575"
 dependencies = [
  "anyhow",
  "base64",
