@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 reticulum = { package = "reticulum-rs", path = "../reticulum" }
-lxmf = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "95bc7537ec0ba4386ff9408371cf79b82e005e17" }
+lxmf = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "5486de7d406c039de953eb5304471c772736ba57" }
 clap = { version = "4.5.29", features = ["derive"] }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 x25519-dalek = { version = "2.0.1" }

@@ -1245,7 +1245,7 @@ dependencies = [
 [[package]]
 name = "lxmf"
 version = "0.1.0"
-source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=95bc7537ec0ba4386ff9408371cf79b82e005e17#95bc7537ec0ba4386ff9408371cf79b82e005e17"
+source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=5486de7d406c039de953eb5304471c772736ba57#5486de7d406c039de953eb5304471c772736ba57"
 dependencies = [
  "anyhow",
  "base64",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "reticulum-rs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "bzip2",
