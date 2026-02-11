@@ -1,30 +1,4 @@
-use clap::Parser;
-use clap::Subcommand;
 use std::io;
-
-#[derive(Parser, Debug)]
-#[command(name = "rnx")]
-pub struct Cli {
-    #[arg(long)]
-    pub config: Option<String>,
-
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum Command {
-    E2e {
-        #[arg(long, default_value_t = 4243)]
-        a_port: u16,
-        #[arg(long, default_value_t = 4244)]
-        b_port: u16,
-        #[arg(long, default_value_t = 60)]
-        timeout_secs: u64,
-        #[arg(long, default_value_t = false)]
-        keep: bool,
-    },
-}
 
 pub fn is_ready_line(line: &str) -> bool {
     line.contains("listening on http://")

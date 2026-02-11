@@ -1,9 +1,8 @@
-use clap::Parser;
+use reticulum::e2e_harness::build_daemon_args;
 use reticulum::e2e_harness::is_ready_line;
 use reticulum::e2e_harness::message_present;
 use reticulum::e2e_harness::peer_present;
 use reticulum::e2e_harness::timestamp_millis;
-use reticulum::e2e_harness::{build_daemon_args, Cli, Command};
 use reticulum::e2e_harness::{build_http_post, parse_http_response_body};
 use reticulum::e2e_harness::{build_rpc_body, parse_rpc_response};
 use reticulum::e2e_harness::{build_rpc_frame, parse_rpc_frame};
@@ -116,12 +115,6 @@ fn peer_present_detects_peer() {
     };
     assert!(peer_present(&response, "peer-b"));
     assert!(!peer_present(&response, "peer-missing"));
-}
-
-#[test]
-fn cli_parses_e2e() {
-    let cli = Cli::parse_from(["rnx", "e2e"]);
-    assert!(matches!(cli.command, Command::E2e { .. }));
 }
 
 #[test]

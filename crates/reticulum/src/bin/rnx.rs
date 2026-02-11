@@ -2,7 +2,7 @@ use clap::Parser;
 use reticulum::e2e_harness::{
     build_daemon_args, build_http_post, build_rpc_frame, build_send_params,
     build_tcp_client_config, is_ready_line, parse_http_response_body, parse_rpc_frame,
-    timestamp_millis, Cli, Command,
+    timestamp_millis,
 };
 use std::collections::HashSet;
 use std::fs;
@@ -12,6 +12,30 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+#[derive(Parser, Debug)]
+#[command(name = "rnx")]
+struct Cli {
+    #[arg(long)]
+    config: Option<String>,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    E2e {
+        #[arg(long, default_value_t = 4243)]
+        a_port: u16,
+        #[arg(long, default_value_t = 4244)]
+        b_port: u16,
+        #[arg(long, default_value_t = 60)]
+        timeout_secs: u64,
+        #[arg(long, default_value_t = false)]
+        keep: bool,
+    },
+}
 
 fn main() {
     let cli = Cli::parse();
