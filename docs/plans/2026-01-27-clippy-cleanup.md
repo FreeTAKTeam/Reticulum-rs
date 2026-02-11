@@ -13,7 +13,7 @@
 ### Task 1: Mechanical clippy fixes (safe refactors)
 
 **Files:**
-- Modify: `src/iface/kaonic/kaonic_grpc.rs`
+- Modify: `src/iface/driver.rs`
 - Modify: `src/transport/link_table.rs`
 - Modify: `src/crypt/fernet.rs`
 - Modify: `src/destination/link.rs`
@@ -102,7 +102,7 @@ Expected: no warnings from the refactors in Step 2; remaining warnings are limit
 **Step 4: Commit**
 
 ```bash
-git add src/iface/kaonic/kaonic_grpc.rs src/transport/link_table.rs src/crypt/fernet.rs src/destination/link.rs src/destination.rs src/hash.rs src/identity.rs src/iface/hdlc.rs src/utils/cache_set.rs src/utils/resolver.rs src/serde.rs src/transport/path_requests.rs src/transport.rs examples/multihop.rs tests/tcp_hdlc_test.rs
+git add src/iface/driver.rs src/transport/link_table.rs src/crypt/fernet.rs src/destination/link.rs src/destination.rs src/hash.rs src/identity.rs src/iface/hdlc.rs src/utils/cache_set.rs src/utils/resolver.rs src/serde.rs src/transport/path_requests.rs src/transport.rs examples/multihop.rs tests/tcp_hdlc_test.rs
 git commit -m "chore: apply mechanical clippy fixes"
 ```
 

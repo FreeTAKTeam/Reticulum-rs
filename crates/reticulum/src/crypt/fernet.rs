@@ -104,10 +104,12 @@ impl<R: CryptoRngCore + Copy> Fernet<R> {
 
     pub fn new_from_slices(sign_key: &[u8], enc_key: &[u8], rng: R) -> Self {
         let mut sign_key_bytes = [0u8; AES_KEY_SIZE];
-        sign_key_bytes[..cmp::min(AES_KEY_SIZE, sign_key.len())].copy_from_slice(sign_key);
+        let sign_len = cmp::min(AES_KEY_SIZE, sign_key.len());
+        sign_key_bytes[..sign_len].copy_from_slice(&sign_key[..sign_len]);
 
         let mut enc_key_bytes = [0u8; AES_KEY_SIZE];
-        enc_key_bytes[..cmp::min(AES_KEY_SIZE, enc_key.len())].copy_from_slice(enc_key);
+        let enc_len = cmp::min(AES_KEY_SIZE, enc_key.len());
+        enc_key_bytes[..enc_len].copy_from_slice(&enc_key[..enc_len]);
 
         Self {
             rng,

@@ -1,66 +1,53 @@
-
 # Reticulum-rs
 
-**Reticulum-rs** is a Rust implementation of the [Reticulum Network Stack](https://reticulum.network/) — a cryptographic, decentralised, and resilient mesh networking protocol designed for communication over any physical layer.
+Rust implementation of the Reticulum network stack with reliability-first architecture.
 
-This project is open source and community-owned, focused on bringing Reticulum capabilities to the Rust ecosystem with clear APIs, reproducible behavior, and portable deployment options.
+## Project Goals
+- Protocol correctness and deterministic behavior.
+- Clear separation of transport core and daemon runtime.
+- Portable core with proprietary drivers kept out-of-tree.
 
-## Features
+## Workspace Layout
 
-- Cryptographic mesh networking
-- Identity-based trust and routing primitives
-- Modular architecture for constrained and general-purpose systems
-- Multiple transport options (TCP, serial)
-- Example clients for testing and integration
-
-## Structure
-
-
-```
+```text
 Reticulum-rs/
-├── src/                 # Core Reticulum protocol implementation
-│   ├── buffer.rs
-│   ├── crypt.rs
-│   ├── destination.rs
-│   ├── error.rs
-│   ├── hash.rs
-│   ├── identity.rs
-│   ├── iface.rs
-│   ├── lib.rs
-│   ├── transport.rs
-│   └── packet.rs
-├── examples/            # Example clients and servers
-│   ├── link_client.rs
-│   ├── tcp_client.rs
-│   ├── tcp_server.rs
-│   └── testnet_client.rs
-├── Cargo.toml           # Crate configuration
-├── LICENSE              # License (MIT/Apache)
-└── ...
-````
-## Getting Started
-
-### Prerequisites
-
-* Rust (edition 2021+)
-
-### Build
-
-```bash
-cargo build --release
+├── crates/
+│   ├── reticulum/           # Protocol and transport core
+│   └── reticulum-daemon/    # Runtime shell and bridge logic
+├── docs/
+│   ├── architecture/
+│   ├── adr/
+│   └── compatibility-contract.md
+└── .github/workflows/ci.yml
 ```
 
-### Run Examples
+## Transport Module Topology
+- `transport::core`
+- `transport::path`
+- `transport::announce`
+- `transport::jobs`
+- `transport::wire`
+
+## Build
 
 ```bash
-# TCP client example
-cargo run --example tcp_client
+cargo check --workspace --all-targets --all-features
+cargo test --workspace --all-targets
 ```
+
+## Extension Boundary
+External hardware integrations should implement traits in:
+- `crates/reticulum/src/iface/driver.rs`
+
+This keeps proprietary drivers outside the repository while preserving integration points.
+
+## Compatibility
+- Cross-repo contract: `docs/compatibility-contract.md`
+
+## Governance
+- Contribution guide: `CONTRIBUTING.md`
+- Security policy: `SECURITY.md`
+- Code owners: `.github/CODEOWNERS`
 
 ## License
-
-This project is licensed under the MIT license.
-
----
-
-Maintained by FreeTAKTeam and contributors.
+MIT

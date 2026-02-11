@@ -1,8 +1,11 @@
+#[cfg(not(feature = "fernet-aes128"))]
 use rand_core::{CryptoRng, RngCore};
 
+#[cfg(not(feature = "fernet-aes128"))]
 #[derive(Clone, Copy)]
 struct FixedRng(u8);
 
+#[cfg(not(feature = "fernet-aes128"))]
 impl RngCore for FixedRng {
     fn next_u32(&mut self) -> u32 {
         u32::from_le_bytes([self.0; 4])
@@ -24,9 +27,11 @@ impl RngCore for FixedRng {
     }
 }
 
+#[cfg(not(feature = "fernet-aes128"))]
 impl CryptoRng for FixedRng {}
 
 #[test]
+#[cfg(not(feature = "fernet-aes128"))]
 fn encrypted_payload_matches_fixture() {
     let key = std::fs::read("tests/fixtures/python/reticulum/crypto_key.bin").unwrap();
     let plaintext = std::fs::read("tests/fixtures/python/reticulum/plaintext.bin").unwrap();

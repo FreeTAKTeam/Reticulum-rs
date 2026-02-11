@@ -1,3 +1,4 @@
+pub mod driver;
 pub mod hdlc;
 pub mod tcp_client;
 pub mod tcp_server;
@@ -13,6 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::hash::AddressHash;
 use crate::hash::Hash;
 use crate::packet::Packet;
+
+pub use driver::{InterfaceDriver, InterfaceDriverFactory};
 
 pub type InterfaceTxSender = mpsc::Sender<TxMessage>;
 pub type InterfaceTxReceiver = mpsc::Receiver<TxMessage>;

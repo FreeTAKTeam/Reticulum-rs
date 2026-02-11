@@ -1,10 +1,11 @@
+#![allow(clippy::items_after_test_module)]
+
+use clap::Parser;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-
-use clap::Parser;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::LocalSet;
@@ -69,6 +70,7 @@ struct PeerCrypto {
 }
 
 impl TransportBridge {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         transport: Arc<Transport>,
         signer: PrivateIdentity,

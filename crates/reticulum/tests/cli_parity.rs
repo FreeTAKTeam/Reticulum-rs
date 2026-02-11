@@ -1,7 +1,15 @@
 #[test]
 fn rnstatus_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnstatus", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnstatus",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -11,7 +19,15 @@ fn rnstatus_help_matches_expected_flags() {
 #[test]
 fn rnprobe_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnprobe", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnprobe",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -21,7 +37,15 @@ fn rnprobe_help_matches_expected_flags() {
 #[test]
 fn rnpath_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnpath", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnpath",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -31,7 +55,15 @@ fn rnpath_help_matches_expected_flags() {
 #[test]
 fn rnid_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnid", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnid",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -41,7 +73,15 @@ fn rnid_help_matches_expected_flags() {
 #[test]
 fn rnsd_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnsd", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnsd",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -51,7 +91,15 @@ fn rnsd_help_matches_expected_flags() {
 #[test]
 fn rncp_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rncp", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rncp",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -61,7 +109,15 @@ fn rncp_help_matches_expected_flags() {
 #[test]
 fn rnx_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnx", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnx",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -71,7 +127,15 @@ fn rnx_help_matches_expected_flags() {
 #[test]
 fn rnpkg_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnpkg", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnpkg",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -81,7 +145,15 @@ fn rnpkg_help_matches_expected_flags() {
 #[test]
 fn rnodeconf_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnodeconf", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnodeconf",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -91,7 +163,15 @@ fn rnodeconf_help_matches_expected_flags() {
 #[test]
 fn rnir_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
-        .args(["run", "--bin", "rnir", "--", "--help"])
+        .args([
+            "run",
+            "--bin",
+            "rnir",
+            "--features",
+            "cli-tools",
+            "--",
+            "--help",
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

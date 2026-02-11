@@ -6,7 +6,7 @@
 
 **Architecture:** Implement Rust modules to mirror Python’s RNS stack, using compatibility-first behavior and golden Python fixtures. Core primitives (crypto, hashes, packet framing, identities, destinations, links, resources) come first, then transport tables and interfaces, then CLI utilities and config compatibility. A shared parity matrix drives sequencing and status.
 
-**Tech Stack:** Rust (edition 2021), serde, prost/tonic (Kaonic), tokio (if used), crypto crates (ed25519-dalek, x25519-dalek, sha2, hkdf, aes, hmac), clap for CLI.
+**Tech Stack:** Rust (edition 2021), serde, tokio + extension-driver traits (out-of-tree proprietary adapters), tokio (if used), crypto crates (ed25519-dalek, x25519-dalek, sha2, hkdf, aes, hmac), clap for CLI.
 
 ---
 
@@ -378,7 +378,7 @@ git commit -m "feat: transport announce cache parity"
 
 ---
 
-### Task 8: Interfaces parity (TCP/UDP/Serial/HDLC/Kaonic)
+### Task 8: Interfaces parity (TCP/UDP/Serial/HDLC/Out-of-tree adapters)
 
 **Files:**
 - Modify: `src/iface/*.rs`
