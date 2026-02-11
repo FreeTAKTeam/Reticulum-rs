@@ -1236,7 +1236,7 @@ dependencies = [
 [[package]]
 name = "lxmf"
 version = "0.1.0"
-source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=5486de7d406c039de953eb5304471c772736ba57#5486de7d406c039de953eb5304471c772736ba57"
+source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=7dbea035c73be8e2a92a053ac3b75631301a67b7#7dbea035c73be8e2a92a053ac3b75631301a67b7"
 dependencies = [
  "anyhow",
  "base64",

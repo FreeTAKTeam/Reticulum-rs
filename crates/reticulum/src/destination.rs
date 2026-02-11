@@ -17,7 +17,7 @@ use crate::{
         self, ContextFlag, DestinationType, Header, HeaderType, IfacFlag, Packet, PacketContext,
         PacketDataBuffer, PacketType, PropagationType,
     },
-    ratchets::{decrypt_with_private_key, now_secs},
+    ratchets::{decrypt_with_identity, decrypt_with_private_key, now_secs},
 };
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -685,31 +685,6 @@ fn try_decrypt_with_ratchets(
         }
     }
     None
-}
-
-fn decrypt_with_identity(
-    identity: &PrivateIdentity,
-    salt: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, RnsError> {
-    if ciphertext.len() <= PUBLIC_KEY_LENGTH {
-        return Err(RnsError::InvalidArgument);
-    }
-    let mut pub_bytes = [0u8; PUBLIC_KEY_LENGTH];
-    pub_bytes.copy_from_slice(&ciphertext[..PUBLIC_KEY_LENGTH]);
-    let ephemeral_public = PublicKey::from(pub_bytes);
-    let derived = identity.derive_key(&ephemeral_public, Some(salt));
-    let key_bytes = derived.as_bytes();
-    let split = key_bytes.len() / 2;
-    let fernet =
-        Fernet::new_from_slices(&key_bytes[..split], &key_bytes[split..], rand_core::OsRng);
-    let token = Token::from(&ciphertext[PUBLIC_KEY_LENGTH..]);
-    let verified = fernet.verify(token).map_err(|_| RnsError::CryptoError)?;
-    let mut out = vec![0u8; ciphertext.len()];
-    let plain = fernet
-        .decrypt(verified, &mut out)
-        .map_err(|_| RnsError::CryptoError)?;
-    Ok(plain.as_bytes().to_vec())
 }
 
 pub type SingleInputDestination = Destination<PrivateIdentity, Input, Single>;
