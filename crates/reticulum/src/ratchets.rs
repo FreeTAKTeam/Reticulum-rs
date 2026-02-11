@@ -129,7 +129,7 @@ impl RatchetStore {
     }
 }
 
-pub(crate) fn encrypt_for_public_key<R: CryptoRngCore + Copy>(
+pub fn encrypt_for_public_key<R: CryptoRngCore + Copy>(
     public_key: &PublicKey,
     salt: &[u8],
     plaintext: &[u8],
@@ -157,7 +157,7 @@ pub(crate) fn encrypt_for_public_key<R: CryptoRngCore + Copy>(
     Ok(out)
 }
 
-pub(crate) fn decrypt_with_private_key(
+pub fn decrypt_with_private_key(
     private_key: &StaticSecret,
     salt: &[u8],
     ciphertext: &[u8],

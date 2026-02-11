@@ -12,7 +12,7 @@ pub mod hash;
 pub mod identity;
 pub mod iface;
 pub mod packet;
-mod ratchets;
+pub mod ratchets;
 pub mod resource;
 pub mod rpc;
 pub mod storage;

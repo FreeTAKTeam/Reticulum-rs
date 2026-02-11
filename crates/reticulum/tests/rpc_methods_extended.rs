@@ -269,3 +269,21 @@ fn stamp_policy_and_ticket_generation() {
     assert!(ticket["ticket"].as_str().unwrap_or_default().len() > 10);
     assert_eq!(ticket["ttl_secs"], 30);
 }
+
+#[test]
+fn ticket_generation_rejects_ttl_overflow() {
+    let daemon = RpcDaemon::test_instance();
+    let err = daemon
+        .handle_rpc(RpcRequest {
+            id: 19,
+            method: "ticket_generate".into(),
+            params: Some(json!({
+                "destination": "6b3362bd2c1dbf87b66a85f79a8d8c75",
+                "ttl_secs": u64::MAX
+            })),
+        })
+        .expect_err("overflow ttl should fail");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("ttl_secs"));
+}

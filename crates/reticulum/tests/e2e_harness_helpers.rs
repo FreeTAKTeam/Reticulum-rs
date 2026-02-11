@@ -20,7 +20,7 @@ fn ready_line_detects_daemon_listening() {
 
 #[test]
 fn rpc_helpers_roundtrip() {
-    let body = build_rpc_body(1, "status", None);
+    let body = build_rpc_body(1, "status", None).expect("build rpc body");
     assert!(body.contains("\"method\":\"status\""));
 
     let resp = json!({"id":1,"result":{"ok":true},"error":null}).to_string();

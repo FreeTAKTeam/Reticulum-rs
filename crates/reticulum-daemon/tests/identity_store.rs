@@ -39,3 +39,16 @@ fn identity_load_returns_error_on_unreadable_existing_path() {
         "identity path should remain intact when read fails"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn identity_file_permissions_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("identity.bin");
+    load_or_create_identity(&path).expect("create identity");
+
+    let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "identity file mode should be 0600");
+}

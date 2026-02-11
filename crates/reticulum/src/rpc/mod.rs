@@ -1011,8 +1011,20 @@ impl RpcDaemon {
                 let parsed: TicketGenerateParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
 
-                let ttl = parsed.ttl_secs.unwrap_or(3600) as i64;
+                let ttl_secs = parsed.ttl_secs.unwrap_or(3600);
+                let ttl = i64::try_from(ttl_secs).map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("ttl_secs exceeds supported range: {ttl_secs}"),
+                    )
+                })?;
                 let now = now_i64();
+                let expires_at = now.checked_add(ttl).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("ttl_secs causes timestamp overflow: {ttl_secs}"),
+                    )
+                })?;
                 let mut hasher = Sha256::new();
                 hasher.update(parsed.destination.as_bytes());
                 hasher.update(now.to_be_bytes());
@@ -1020,7 +1032,7 @@ impl RpcDaemon {
                 let record = TicketRecord {
                     destination: parsed.destination.clone(),
                     ticket: ticket.clone(),
-                    expires_at: now + ttl,
+                    expires_at,
                 };
 
                 self.ticket_cache
@@ -1034,7 +1046,7 @@ impl RpcDaemon {
                         "ticket": record.ticket,
                         "destination": record.destination,
                         "expires_at": record.expires_at,
-                        "ttl_secs": ttl,
+                        "ttl_secs": ttl_secs,
                     })),
                     error: None,
                 })
