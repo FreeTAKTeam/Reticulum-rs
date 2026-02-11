@@ -1,18 +1,12 @@
 use std::fs;
-use std::path::PathBuf;
+use std::io;
 
 use reticulum_daemon::identity_store::load_or_create_identity;
 
-fn temp_identity_path() -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!("reticulumd-identity-{}", std::process::id()));
-    path
-}
-
 #[test]
 fn identity_persists_across_reloads() {
-    let path = temp_identity_path();
-    let _ = fs::remove_file(&path);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("identity.bin");
 
     let first = load_or_create_identity(&path).expect("create identity");
     assert!(path.exists(), "identity file should be created");
@@ -23,6 +17,25 @@ fn identity_persists_across_reloads() {
         second.to_private_key_bytes(),
         "identity should be stable across reloads"
     );
+}
 
-    let _ = fs::remove_file(&path);
+#[test]
+fn identity_load_returns_error_on_unreadable_existing_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("identity-dir");
+    fs::create_dir(&path).expect("create directory");
+
+    let err = match load_or_create_identity(&path) {
+        Ok(_) => panic!("directory read should fail"),
+        Err(err) => err,
+    };
+    assert_ne!(
+        err.kind(),
+        io::ErrorKind::NotFound,
+        "existing unreadable paths should not be treated as missing identity files"
+    );
+    assert!(
+        path.is_dir(),
+        "identity path should remain intact when read fails"
+    );
 }

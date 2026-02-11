@@ -12,3 +12,6 @@ repository = "https://github.com/FreeTAKTeam/Reticulum-rs"
 
 [patch.crates-io]
 reticulum-rs = { path = "crates/reticulum" }
+
+[patch."https://github.com/FreeTAKTeam/Reticulum-rs.git"]
+reticulum-rs = { path = "crates/reticulum" }

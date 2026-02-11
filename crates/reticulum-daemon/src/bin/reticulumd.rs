@@ -97,10 +97,7 @@ impl OutboundBridge for TransportBridge {
         &self,
         record: &reticulum::storage::messages::MessageRecord,
     ) -> Result<(), std::io::Error> {
-        let destination = parse_destination_hex(&record.destination);
-        let Some(destination) = destination else {
-            return Ok(());
-        };
+        let destination = parse_destination_hex_required(&record.destination)?;
         let peer_info = self
             .peer_crypto
             .lock()
@@ -291,6 +288,15 @@ fn parse_destination_hex(input: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
+fn parse_destination_hex_required(input: &str) -> Result<[u8; 16], std::io::Error> {
+    parse_destination_hex(input).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid destination hash '{input}' (expected 16-byte hex)"),
+        )
+    })
+}
+
 fn opportunistic_payload<'a>(payload: &'a [u8], destination: &[u8; 16]) -> &'a [u8] {
     if payload.len() > 16 && payload[..16] == destination[..] {
         &payload[16..]
@@ -335,7 +341,7 @@ fn send_outcome_status(method: &str, outcome: SendPacketOutcome) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{opportunistic_payload, send_outcome_status};
+    use super::{opportunistic_payload, parse_destination_hex_required, send_outcome_status};
     use reticulum::transport::SendPacketOutcome;
 
     #[test]
@@ -377,6 +383,12 @@ mod tests {
             send_outcome_status("opportunistic", SendPacketOutcome::DroppedNoRoute),
             "failed: opportunistic no route"
         );
+    }
+
+    #[test]
+    fn parse_destination_hex_required_rejects_invalid_hashes() {
+        let err = parse_destination_hex_required("not-hex").expect_err("invalid hash");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }
 

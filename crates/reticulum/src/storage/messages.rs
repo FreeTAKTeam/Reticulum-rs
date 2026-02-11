@@ -41,15 +41,15 @@ impl MessagesStore {
         self.conn.execute(
             "INSERT OR REPLACE INTO messages (id, source, destination, title, content, timestamp, direction, fields, receipt_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                record.id,
-                record.source,
-                record.destination,
-                record.title,
-                record.content,
+                &record.id,
+                &record.source,
+                &record.destination,
+                &record.title,
+                &record.content,
                 record.timestamp,
-                record.direction,
+                &record.direction,
                 fields_json,
-                record.receipt_status,
+                &record.receipt_status,
             ],
         )?;
         Ok(())
