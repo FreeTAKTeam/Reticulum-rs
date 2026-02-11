@@ -67,7 +67,7 @@ fn write_private_key_tmp(path: &Path, key_bytes: &[u8]) -> io::Result<()> {
         let mut file = options.open(path)?;
         file.write_all(key_bytes)?;
         file.sync_all()?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(unix))]
