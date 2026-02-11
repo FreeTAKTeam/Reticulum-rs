@@ -42,6 +42,10 @@ jobs:
       - name: Checkout LXMF-rs (main)
         run: git clone --depth 1 https://github.com/FreeTAKTeam/LXMF-rs.git ../LXMF-rs
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Pin LXMF sibling dependency to checked-out reticulum
         run: |
           perl -0pi -e 's#reticulum = \{ package = "reticulum-rs", version = "[^"]+" \}#reticulum = { package = "reticulum-rs", path = "../../../Reticulum-rs/crates/reticulum" }#g' ../LXMF-rs/crates/lxmf/Cargo.toml
