@@ -133,7 +133,9 @@ pub(super) async fn manage_transport(
                             continue;
                         }
 
-                        if handler.config.broadcast {
+                        if handler.config.broadcast
+                            && packet.header.packet_type != PacketType::Announce
+                        {
                             handler
                                 .send(TxMessage {
                                     tx_type: TxMessageType::Broadcast(Some(message.address)),

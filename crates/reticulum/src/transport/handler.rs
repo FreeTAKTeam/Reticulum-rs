@@ -95,7 +95,7 @@ impl TransportHandler {
                 direct_iface: Some(iface),
                 broadcast: false,
             }
-        } else if self.config.broadcast {
+        } else if self.config.broadcast || packet.header.packet_type == PacketType::Announce {
             self.send(TxMessage {
                 tx_type: TxMessageType::Broadcast(None),
                 packet,

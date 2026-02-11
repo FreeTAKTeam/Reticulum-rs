@@ -183,6 +183,27 @@ async fn send_packet_with_outcome_reports_no_route() {
 
     let packet = Packet {
         header: Header {
+            packet_type: PacketType::Data,
+            ..Default::default()
+        },
+        context: PacketContext::KeepAlive,
+        data: PacketDataBuffer::new_from_slice(&[KEEP_ALIVE_REQUEST]),
+        destination: AddressHash::new_from_rand(OsRng),
+        ..Default::default()
+    };
+    let outcome = transport.send_packet_with_outcome(packet).await;
+
+    assert_eq!(outcome, SendPacketOutcome::DroppedNoRoute);
+}
+
+#[tokio::test]
+async fn send_packet_with_outcome_broadcasts_announce_without_route() {
+    let identity = PrivateIdentity::new_from_rand(OsRng);
+    let config = TransportConfig::new("test", &identity, false);
+    let transport = Transport::new(config);
+
+    let packet = Packet {
+        header: Header {
             packet_type: PacketType::Announce,
             ..Default::default()
         },
@@ -191,5 +212,5 @@ async fn send_packet_with_outcome_reports_no_route() {
     };
     let outcome = transport.send_packet_with_outcome(packet).await;
 
-    assert_eq!(outcome, SendPacketOutcome::DroppedNoRoute);
+    assert_eq!(outcome, SendPacketOutcome::SentBroadcast);
 }
