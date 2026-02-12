@@ -144,6 +144,16 @@ impl TcpClient {
                                                         if PACKET_TRACE {
                                                             log::trace!("tcp_client: rx << ({}) {}", iface_address, packet);
                                                         }
+                                                        if tx_diag_enabled() {
+                                                            eprintln!(
+                                                                "[tp-diag] tcp_client rx_packet iface={} type={:?} dst={} ctx={:02x} hops={}",
+                                                                iface_address,
+                                                                packet.header.packet_type,
+                                                                packet.destination,
+                                                                packet.context as u8,
+                                                                packet.header.hops
+                                                            );
+                                                        }
                                                         let _ = rx_channel
                                                             .send(RxMessage {
                                                                 address: iface_address,

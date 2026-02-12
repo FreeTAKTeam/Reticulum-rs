@@ -7,6 +7,7 @@ pub mod udp;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task;
@@ -112,6 +113,9 @@ pub struct InterfaceManager {
     ifaces: Vec<LocalInterface>,
 }
 
+const DEFAULT_IFACE_TX_QUEUE_CAPACITY: usize = 128;
+const IFACE_TX_ENQUEUE_TIMEOUT_MS: u64 = 200;
+
 fn tx_diag_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -169,7 +173,7 @@ impl InterfaceManager {
     }
 
     pub fn new_context<T: Interface>(&mut self, inner: T) -> InterfaceContext<T> {
-        let channel = self.new_channel(1);
+        let channel = self.new_channel(DEFAULT_IFACE_TX_QUEUE_CAPACITY);
 
         let inner = Arc::new(Mutex::new(inner));
 
@@ -219,19 +223,69 @@ impl InterfaceManager {
 
             if should_send && !iface.stop.is_cancelled() {
                 trace.matched_ifaces += 1;
-                if iface.tx_send.send(message).await.is_ok() {
-                    trace.sent_ifaces += 1;
-                } else {
-                    trace.failed_ifaces += 1;
-                    log::warn!(
-                        "iface: failed to enqueue tx on {} for {:?}",
-                        iface.address,
-                        message.tx_type
-                    );
-                    eprintln!(
-                        "[tp-diag] iface enqueue failed iface={} tx_type={:?}",
-                        iface.address, message.tx_type
-                    );
+                match iface.tx_send.try_send(message) {
+                    Ok(()) => {
+                        trace.sent_ifaces += 1;
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Fall back to a short async wait before dropping. This avoids
+                        // dropping critical packets (link proofs, receipts) under bursts.
+                        match tokio::time::timeout(
+                            Duration::from_millis(IFACE_TX_ENQUEUE_TIMEOUT_MS),
+                            iface.tx_send.send(message),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {
+                                trace.sent_ifaces += 1;
+                                log::warn!(
+                                    "iface: recovered from full tx queue on {} for {:?}",
+                                    iface.address,
+                                    message.tx_type
+                                );
+                                eprintln!(
+                                    "[tp-diag] iface enqueue recovered iface={} tx_type={:?}",
+                                    iface.address, message.tx_type
+                                );
+                            }
+                            Ok(Err(_)) => {
+                                trace.failed_ifaces += 1;
+                                log::warn!(
+                                    "iface: tx queue closed on {} for {:?}",
+                                    iface.address,
+                                    message.tx_type
+                                );
+                                eprintln!(
+                                    "[tp-diag] iface enqueue closed iface={} tx_type={:?}",
+                                    iface.address, message.tx_type
+                                );
+                            }
+                            Err(_) => {
+                                trace.failed_ifaces += 1;
+                                log::warn!(
+                                    "iface: tx queue full timeout on {} for {:?}",
+                                    iface.address,
+                                    message.tx_type
+                                );
+                                eprintln!(
+                                    "[tp-diag] iface enqueue timeout iface={} tx_type={:?}",
+                                    iface.address, message.tx_type
+                                );
+                            }
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        trace.failed_ifaces += 1;
+                        log::warn!(
+                            "iface: tx queue closed on {} for {:?}",
+                            iface.address,
+                            message.tx_type
+                        );
+                        eprintln!(
+                            "[tp-diag] iface enqueue closed iface={} tx_type={:?}",
+                            iface.address, message.tx_type
+                        );
+                    }
                 }
             }
         }

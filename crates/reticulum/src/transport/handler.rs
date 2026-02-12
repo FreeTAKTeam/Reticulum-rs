@@ -130,11 +130,16 @@ impl TransportHandler {
                     packet,
                 })
                 .await;
+            let outcome = if dispatch.sent_ifaces > 0 {
+                SendPacketOutcome::SentDirect
+            } else {
+                SendPacketOutcome::DroppedNoRoute
+            };
             if transport_diag_enabled() {
                 eprintln!(
                     "[tp-diag] direct_send iface={} outcome={:?} matched={} sent={} failed={}",
                     iface,
-                    SendPacketOutcome::SentDirect,
+                    outcome,
                     dispatch.matched_ifaces,
                     dispatch.sent_ifaces,
                     dispatch.failed_ifaces
@@ -142,14 +147,14 @@ impl TransportHandler {
                 log::info!(
                     "[tp-diag] direct_send iface={} outcome={:?} matched={} sent={} failed={}",
                     iface,
-                    SendPacketOutcome::SentDirect,
+                    outcome,
                     dispatch.matched_ifaces,
                     dispatch.sent_ifaces,
                     dispatch.failed_ifaces
                 );
             }
             SendPacketTrace {
-                outcome: SendPacketOutcome::SentDirect,
+                outcome,
                 direct_iface: Some(iface),
                 broadcast: false,
                 dispatch,
@@ -161,24 +166,26 @@ impl TransportHandler {
                     packet,
                 })
                 .await;
+            let outcome = if dispatch.sent_ifaces > 0 {
+                SendPacketOutcome::SentBroadcast
+            } else {
+                SendPacketOutcome::DroppedNoRoute
+            };
             if transport_diag_enabled() {
                 eprintln!(
                     "[tp-diag] broadcast_send outcome={:?} matched={} sent={} failed={}",
-                    SendPacketOutcome::SentBroadcast,
-                    dispatch.matched_ifaces,
-                    dispatch.sent_ifaces,
-                    dispatch.failed_ifaces
+                    outcome, dispatch.matched_ifaces, dispatch.sent_ifaces, dispatch.failed_ifaces
                 );
                 log::info!(
                     "[tp-diag] broadcast_send outcome={:?} matched={} sent={} failed={}",
-                    SendPacketOutcome::SentBroadcast,
+                    outcome,
                     dispatch.matched_ifaces,
                     dispatch.sent_ifaces,
                     dispatch.failed_ifaces
                 );
             }
             SendPacketTrace {
-                outcome: SendPacketOutcome::SentBroadcast,
+                outcome,
                 direct_iface: None,
                 broadcast: true,
                 dispatch,

@@ -197,7 +197,7 @@ async fn send_packet_with_outcome_reports_no_route() {
 }
 
 #[tokio::test]
-async fn send_packet_with_outcome_broadcasts_announce_without_route() {
+async fn send_packet_with_outcome_drops_announce_without_route() {
     let identity = PrivateIdentity::new_from_rand(OsRng);
     let config = TransportConfig::new("test", &identity, false);
     let transport = Transport::new(config);
@@ -212,5 +212,5 @@ async fn send_packet_with_outcome_broadcasts_announce_without_route() {
     };
     let outcome = transport.send_packet_with_outcome(packet).await;
 
-    assert_eq!(outcome, SendPacketOutcome::SentBroadcast);
+    assert_eq!(outcome, SendPacketOutcome::DroppedNoRoute);
 }

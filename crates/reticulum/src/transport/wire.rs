@@ -152,6 +152,7 @@ pub(super) fn should_encrypt_packet(packet: &Packet) -> bool {
 
 pub(super) async fn handle_data<'a>(
     packet: &Packet,
+    iface: AddressHash,
     mut handler: MutexGuard<'a, TransportHandler>,
 ) {
     let mut data_handled = false;
@@ -251,10 +252,20 @@ pub(super) async fn handle_data<'a>(
         }
 
         for packet in link_packets {
-            handler.send_packet(packet).await;
+            handler
+                .send(TxMessage {
+                    tx_type: TxMessageType::Direct(iface),
+                    packet,
+                })
+                .await;
         }
         for packet in proof_packets {
-            handler.send_packet(packet).await;
+            handler
+                .send(TxMessage {
+                    tx_type: TxMessageType::Direct(iface),
+                    packet,
+                })
+                .await;
         }
 
         if handle_keepalive_response(packet, &mut handler).await {

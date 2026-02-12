@@ -11,7 +11,7 @@ impl Transport {
         let (iface_messages_tx, _) = tokio::sync::broadcast::channel(16);
         let (resource_events_tx, _) = tokio::sync::broadcast::channel(16);
 
-        let iface_manager = InterfaceManager::new(16);
+        let iface_manager = InterfaceManager::new(128);
 
         let rx_receiver = iface_manager.receiver();
 
@@ -185,6 +185,11 @@ impl Transport {
         app_data: Option<&[u8]>,
     ) {
         let mut destination = destination.lock().await;
+        eprintln!(
+            "[tp] announce_tx dst={} app_data_len={}",
+            destination.desc.address_hash,
+            app_data.map(|value| value.len()).unwrap_or(0)
+        );
         let packet = destination
             .announce(OsRng, app_data)
             .expect("valid announce packet");
