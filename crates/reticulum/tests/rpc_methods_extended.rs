@@ -21,6 +21,8 @@ fn daemon_status_ex_exposes_capabilities() {
         .expect("capabilities");
     assert!(caps.iter().any(|c| c == "send_message_v2"));
     assert!(caps.iter().any(|c| c == "set_interfaces"));
+    assert!(caps.iter().any(|c| c == "list_announces"));
+    assert!(caps.iter().any(|c| c == "message_delivery_trace"));
 }
 
 #[test]
@@ -302,4 +304,101 @@ fn ticket_generation_rejects_ttl_overflow() {
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("ttl_secs"));
+}
+
+#[test]
+fn propagation_node_selection_roundtrip() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 20,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-a",
+                "timestamp": 200,
+                "capabilities": ["propagation", "attachments"]
+            })),
+        })
+        .expect("announce_received");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 21,
+            method: "set_outbound_propagation_node".into(),
+            params: Some(json!({
+                "peer": "relay-a"
+            })),
+        })
+        .expect("set_outbound_propagation_node");
+
+    let selected = daemon
+        .handle_rpc(RpcRequest {
+            id: 22,
+            method: "get_outbound_propagation_node".into(),
+            params: None,
+        })
+        .expect("get_outbound_propagation_node");
+    assert_eq!(selected.result.expect("result")["peer"], "relay-a");
+
+    let listed = daemon
+        .handle_rpc(RpcRequest {
+            id: 23,
+            method: "list_propagation_nodes".into(),
+            params: None,
+        })
+        .expect("list_propagation_nodes");
+    let listed_result = listed.result.expect("result");
+    let nodes = listed_result
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .expect("nodes");
+    assert!(nodes
+        .iter()
+        .any(|entry| entry["peer"] == "relay-a" && entry["selected"] == true));
+}
+
+#[test]
+fn message_delivery_trace_records_transitions() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 24,
+            method: "send_message".into(),
+            params: Some(json!({
+                "id": "trace-1",
+                "source": "alice",
+                "destination": "bob",
+                "content": "hello"
+            })),
+        })
+        .expect("send_message");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 25,
+            method: "record_receipt".into(),
+            params: Some(json!({
+                "message_id": "trace-1",
+                "status": "delivered"
+            })),
+        })
+        .expect("record_receipt");
+
+    let trace = daemon
+        .handle_rpc(RpcRequest {
+            id: 26,
+            method: "message_delivery_trace".into(),
+            params: Some(json!({
+                "message_id": "trace-1"
+            })),
+        })
+        .expect("message_delivery_trace");
+    let trace_result = trace.result.expect("result");
+    let transitions = trace_result
+        .get("transitions")
+        .and_then(|v| v.as_array())
+        .expect("transitions");
+    assert!(transitions.iter().any(|entry| entry["status"] == "queued"));
+    assert!(transitions.iter().any(|entry| entry["status"] == "sending"));
+    assert!(transitions
+        .iter()
+        .any(|entry| entry["status"] == "delivered"));
 }

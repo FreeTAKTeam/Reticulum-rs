@@ -1,4 +1,5 @@
 use reticulum::rpc::{RpcDaemon, RpcRequest};
+use serde_json::json;
 
 #[test]
 fn announce_now_emits_event() {
@@ -62,6 +63,24 @@ fn announce_received_updates_peers() {
     assert_eq!(peers[0].get("first_seen").unwrap(), 123);
     assert_eq!(peers[0].get("last_seen").unwrap(), 123);
     assert_eq!(peers[0].get("seen_count").unwrap(), 1);
+
+    let announces = daemon
+        .handle_rpc(RpcRequest {
+            id: 4,
+            method: "list_announces".into(),
+            params: None,
+        })
+        .unwrap()
+        .result
+        .unwrap()
+        .get("announces")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(announces.len(), 1);
+    assert_eq!(announces[0].get("peer").unwrap(), "peer-a");
+    assert_eq!(announces[0].get("name").unwrap(), "Alice");
 }
 
 #[test]
@@ -128,4 +147,168 @@ fn repeated_announces_increment_seen_count_and_preserve_first_seen() {
     assert_eq!(peer["seen_count"], 3);
     assert_eq!(peer["name"], "New Name");
     assert_eq!(peer["name_source"], "pn_meta");
+
+    let announces = daemon
+        .handle_rpc(RpcRequest {
+            id: 5,
+            method: "list_announces".into(),
+            params: None,
+        })
+        .unwrap()
+        .result
+        .unwrap()
+        .get("announces")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(announces.len(), 3);
+}
+
+#[test]
+fn announce_capabilities_are_normalized_and_persisted() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 1,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-a",
+                "timestamp": 321,
+                "capabilities": [" Propagation ", "commands", "propagation", ""]
+            })),
+        })
+        .expect("announce_received");
+
+    let event = daemon.take_event().expect("announce event");
+    assert_eq!(event.event_type, "announce_received");
+    assert_eq!(
+        event.payload["capabilities"],
+        json!(["propagation", "commands"])
+    );
+
+    let announces = daemon
+        .handle_rpc(RpcRequest {
+            id: 2,
+            method: "list_announces".into(),
+            params: None,
+        })
+        .expect("list_announces")
+        .result
+        .expect("result")
+        .get("announces")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .expect("announce list");
+    assert_eq!(announces[0]["peer"], "relay-a");
+    assert_eq!(
+        announces[0]["capabilities"],
+        json!(["propagation", "commands"])
+    );
+}
+
+#[test]
+fn announce_capabilities_can_be_derived_from_app_data_hex() {
+    let daemon = RpcDaemon::test_instance();
+    let app_data = rmp_serde::to_vec(&json!([
+        "node name",
+        0,
+        { "capabilities": ["Paper", "commands", "paper"] }
+    ]))
+    .expect("encode app data");
+
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 1,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-b",
+                "timestamp": 500,
+                "app_data_hex": hex::encode(app_data),
+            })),
+        })
+        .expect("announce_received");
+
+    let announces = daemon
+        .handle_rpc(RpcRequest {
+            id: 2,
+            method: "list_announces".into(),
+            params: None,
+        })
+        .expect("list_announces")
+        .result
+        .expect("result")
+        .get("announces")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .expect("announce list");
+    assert_eq!(announces[0]["peer"], "relay-b");
+    assert_eq!(announces[0]["capabilities"], json!(["paper", "commands"]));
+}
+
+#[test]
+fn list_announces_applies_limit_and_before_ts() {
+    let daemon = RpcDaemon::test_instance();
+    for (id, (peer, timestamp)) in [
+        ("peer-1", 100_i64),
+        ("peer-2", 200_i64),
+        ("peer-3", 300_i64),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        daemon
+            .handle_rpc(RpcRequest {
+                id: id as u64 + 1,
+                method: "announce_received".into(),
+                params: Some(json!({
+                    "peer": peer,
+                    "timestamp": timestamp,
+                })),
+            })
+            .expect("announce_received");
+    }
+
+    let latest = daemon
+        .handle_rpc(RpcRequest {
+            id: 10,
+            method: "list_announces".into(),
+            params: Some(json!({
+                "limit": 2
+            })),
+        })
+        .expect("list_announces latest")
+        .result
+        .expect("latest result")
+        .get("announces")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .expect("latest announces");
+    let latest_timestamps: Vec<i64> = latest
+        .iter()
+        .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
+        .collect();
+    assert_eq!(latest_timestamps, vec![300, 200]);
+
+    let older = daemon
+        .handle_rpc(RpcRequest {
+            id: 11,
+            method: "list_announces".into(),
+            params: Some(json!({
+                "limit": 5,
+                "before_ts": 250
+            })),
+        })
+        .expect("list_announces older")
+        .result
+        .expect("older result")
+        .get("announces")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .expect("older announces");
+    let older_timestamps: Vec<i64> = older
+        .iter()
+        .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
+        .collect();
+    assert_eq!(older_timestamps, vec![200, 100]);
 }
