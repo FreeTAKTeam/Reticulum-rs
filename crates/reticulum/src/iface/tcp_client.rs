@@ -112,7 +112,7 @@ impl TcpClient {
 
                 tokio::spawn(async move {
                     let mut hdlc_rx_buffer = [0u8; BUFFER_SIZE];
-                    let mut rx_buffer = [0u8; BUFFER_SIZE + (BUFFER_SIZE / 2)];
+                    let mut frame_buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE * 4);
                     let mut tcp_buffer = [0u8; (BUFFER_SIZE * 16)];
 
                     loop {
@@ -131,36 +131,41 @@ impl TcpClient {
                                             break;
                                         }
                                         Ok(n) => {
-                                            // TCP stream may contain several or partial HDLC frames
-                                            for &byte in tcp_buffer.iter().take(n) {
-                                                // Push new byte from the end of buffer
-                                                rx_buffer[BUFFER_SIZE - 1] = byte;
+                                            // TCP can deliver partial or multiple HDLC frames.
+                                            frame_buffer.extend_from_slice(&tcp_buffer[..n]);
 
-                                                // Check if it is contains a HDLC frame
-                                                let frame = Hdlc::find(&rx_buffer[..]);
-                                                if let Some(frame) = frame {
-                                                    // Decode HDLC frame and deserialize packet
-                                                    let frame_buffer = &mut rx_buffer[frame.0..frame.1+1];
-                                                    let mut output = OutputBuffer::new(&mut hdlc_rx_buffer[..]);
-                                                    if Hdlc::decode(frame_buffer, &mut output).is_ok() {
-                                                        if let Ok(packet) = Packet::deserialize(&mut InputBuffer::new(output.as_slice())) {
-                                                            if PACKET_TRACE {
-                                                                log::trace!("tcp_client: rx << ({}) {}", iface_address, packet);
-                                                            }
-                                                            let _ = rx_channel.send(RxMessage { address: iface_address, packet }).await;
-                                                        } else {
-                                                            log::warn!("tcp_client: couldn't decode packet");
+                                            while let Some((start, end)) = Hdlc::find(&frame_buffer) {
+                                                let frame = &frame_buffer[start..=end];
+                                                let mut output = OutputBuffer::new(&mut hdlc_rx_buffer[..]);
+                                                if Hdlc::decode(frame, &mut output).is_ok() {
+                                                    if let Ok(packet) =
+                                                        Packet::deserialize(&mut InputBuffer::new(output.as_slice()))
+                                                    {
+                                                        if PACKET_TRACE {
+                                                            log::trace!("tcp_client: rx << ({}) {}", iface_address, packet);
                                                         }
+                                                        let _ = rx_channel
+                                                            .send(RxMessage {
+                                                                address: iface_address,
+                                                                packet,
+                                                            })
+                                                            .await;
                                                     } else {
-                                                        log::warn!("tcp_client: couldn't decode hdlc frame");
+                                                        log::warn!("tcp_client: couldn't decode packet");
                                                     }
-
-                                                    // Remove current HDLC frame data
-                                                    frame_buffer.fill(0);
                                                 } else {
-                                                    // Move data left
-                                                    rx_buffer.copy_within(1.., 0);
+                                                    log::warn!("tcp_client: couldn't decode hdlc frame");
                                                 }
+
+                                                // Drop all bytes up to and including the closing
+                                                // flag of the frame we just handled.
+                                                frame_buffer.drain(..=end);
+                                            }
+
+                                            if frame_buffer.len() > BUFFER_SIZE * 64 {
+                                                // Guard against unbounded growth on malformed
+                                                // streams where no valid frame closes.
+                                                frame_buffer.clear();
                                             }
                                         }
                                         Err(e) => {
