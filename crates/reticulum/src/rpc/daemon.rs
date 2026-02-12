@@ -348,13 +348,25 @@ impl RpcDaemon {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?
                     .unwrap_or_default();
                 let limit = parsed.limit.unwrap_or(200).clamp(1, 5000);
+                let before_ts = parsed
+                    .before_ts
+                    .or_else(|| parse_announce_cursor(parsed.cursor.as_deref()));
                 let items = self
                     .store
-                    .list_announces(limit, parsed.before_ts)
+                    .list_announces(limit, before_ts)
                     .map_err(std::io::Error::other)?;
+                let next_cursor = if items.len() >= limit {
+                    items.last().map(|record| record.timestamp.to_string())
+                } else {
+                    None
+                };
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "announces": items })),
+                    result: Some(json!({
+                        "announces": items,
+                        "next_cursor": next_cursor,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -576,18 +588,27 @@ impl RpcDaemon {
                 self.store
                     .update_receipt_status(&parsed.message_id, &parsed.status)
                     .map_err(std::io::Error::other)?;
-                self.append_delivery_trace(&parsed.message_id, parsed.status.clone());
+                let message_id = parsed.message_id;
+                let status = parsed.status;
+                self.append_delivery_trace(&message_id, status.clone());
+                let reason_code = delivery_reason_code(&status);
                 let event = RpcEvent {
                     event_type: "receipt".into(),
-                    payload: json!({ "message_id": parsed.message_id, "status": parsed.status }),
+                    payload: json!({
+                        "message_id": message_id,
+                        "status": status,
+                        "reason_code": reason_code,
+                    }),
                 };
                 self.push_event(event.clone());
                 let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(
-                        json!({ "message_id": parsed.message_id, "status": parsed.status }),
-                    ),
+                    result: Some(json!({
+                        "message_id": message_id,
+                        "status": status,
+                        "reason_code": reason_code,
+                    })),
                     error: None,
                 })
             }
@@ -609,6 +630,7 @@ impl RpcDaemon {
                     result: Some(json!({
                         "message_id": parsed.message_id,
                         "transitions": traces,
+                        "meta": self.response_meta(),
                     })),
                     error: None,
                 })
@@ -772,7 +794,10 @@ impl RpcDaemon {
                     .clone();
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "peer": selected })),
+                    result: Some(json!({
+                        "peer": selected,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -801,7 +826,10 @@ impl RpcDaemon {
                 let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "peer": peer })),
+                    result: Some(json!({
+                        "peer": peer,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -846,7 +874,10 @@ impl RpcDaemon {
                 });
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "nodes": nodes })),
+                    result: Some(json!({
+                        "nodes": nodes,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -1102,6 +1133,14 @@ impl RpcDaemon {
         }
     }
 
+    fn response_meta(&self) -> JsonValue {
+        json!({
+            "contract_version": "v2",
+            "profile": JsonValue::Null,
+            "rpc_endpoint": JsonValue::Null,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn store_outbound(
         &self,
@@ -1144,10 +1183,17 @@ impl RpcDaemon {
             let status = format!("failed: {err}");
             let _ = self.store.update_receipt_status(&id, &status);
             record.receipt_status = Some(status);
-            self.append_delivery_trace(&id, record.receipt_status.clone().unwrap_or_default());
+            let resolved_status = record.receipt_status.clone().unwrap_or_default();
+            self.append_delivery_trace(&id, resolved_status.clone());
+            let reason_code = delivery_reason_code(&resolved_status);
             let event = RpcEvent {
                 event_type: "outbound".into(),
-                payload: json!({ "message": record, "method": method, "error": err.to_string() }),
+                payload: json!({
+                    "message": record,
+                    "method": method,
+                    "error": err.to_string(),
+                    "reason_code": reason_code,
+                }),
             };
             self.push_event(event.clone());
             let _ = self.events.send(event);
@@ -1161,10 +1207,14 @@ impl RpcDaemon {
             });
         }
         let sent_status = format!("sent: {}", method.as_deref().unwrap_or("direct"));
-        self.append_delivery_trace(&id, sent_status);
+        self.append_delivery_trace(&id, sent_status.clone());
         let event = RpcEvent {
             event_type: "outbound".into(),
-            payload: json!({ "message": record, "method": method }),
+            payload: json!({
+                "message": record,
+                "method": method,
+                "reason_code": delivery_reason_code(&sent_status),
+            }),
         };
         self.push_event(event.clone());
         let _ = self.events.send(event);
@@ -1313,4 +1363,42 @@ impl RpcDaemon {
         self.push_event(event.clone());
         let _ = self.events.send(event);
     }
+}
+
+fn parse_announce_cursor(cursor: Option<&str>) -> Option<i64> {
+    let raw = cursor?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(timestamp) = raw.parse::<i64>() {
+        return Some(timestamp);
+    }
+    let tail = raw.rsplit(':').next()?;
+    tail.parse::<i64>().ok()
+}
+
+fn delivery_reason_code(status: &str) -> Option<&'static str> {
+    let normalized = status.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.contains("receipt timeout") {
+        return Some("receipt_timeout");
+    }
+    if normalized.contains("timeout") {
+        return Some("timeout");
+    }
+    if normalized.contains("no route")
+        || normalized.contains("no path")
+        || normalized.contains("no known path")
+    {
+        return Some("no_path");
+    }
+    if normalized.contains("no propagation relay selected") {
+        return Some("relay_unset");
+    }
+    if normalized.contains("retry budget exhausted") {
+        return Some("retry_budget_exhausted");
+    }
+    None
 }

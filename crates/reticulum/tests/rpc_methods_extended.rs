@@ -337,7 +337,9 @@ fn propagation_node_selection_roundtrip() {
             params: None,
         })
         .expect("get_outbound_propagation_node");
-    assert_eq!(selected.result.expect("result")["peer"], "relay-a");
+    let selected_result = selected.result.expect("result");
+    assert_eq!(selected_result["peer"], "relay-a");
+    assert_eq!(selected_result["meta"]["contract_version"], "v2");
 
     let listed = daemon
         .handle_rpc(RpcRequest {
@@ -347,6 +349,7 @@ fn propagation_node_selection_roundtrip() {
         })
         .expect("list_propagation_nodes");
     let listed_result = listed.result.expect("result");
+    assert_eq!(listed_result["meta"]["contract_version"], "v2");
     let nodes = listed_result
         .get("nodes")
         .and_then(|v| v.as_array())
@@ -392,6 +395,7 @@ fn message_delivery_trace_records_transitions() {
         })
         .expect("message_delivery_trace");
     let trace_result = trace.result.expect("result");
+    assert_eq!(trace_result["meta"]["contract_version"], "v2");
     let transitions = trace_result
         .get("transitions")
         .and_then(|v| v.as_array())
@@ -401,4 +405,41 @@ fn message_delivery_trace_records_transitions() {
     assert!(transitions
         .iter()
         .any(|entry| entry["status"] == "delivered"));
+}
+
+#[test]
+fn receipt_event_exposes_reason_code() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 27,
+            method: "send_message".into(),
+            params: Some(json!({
+                "id": "trace-reason-1",
+                "source": "alice",
+                "destination": "bob",
+                "content": "hello"
+            })),
+        })
+        .expect("send_message");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 28,
+            method: "record_receipt".into(),
+            params: Some(json!({
+                "message_id": "trace-reason-1",
+                "status": "failed: receipt timeout"
+            })),
+        })
+        .expect("record_receipt");
+
+    let mut receipt_event = None;
+    while let Some(event) = daemon.take_event() {
+        if event.event_type == "receipt" {
+            receipt_event = Some(event);
+        }
+    }
+
+    let receipt_event = receipt_event.expect("receipt event");
+    assert_eq!(receipt_event.payload["reason_code"], "receipt_timeout");
 }

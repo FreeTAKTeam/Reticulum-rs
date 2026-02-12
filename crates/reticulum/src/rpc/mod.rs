@@ -252,6 +252,8 @@ struct ListAnnouncesParams {
     limit: Option<usize>,
     #[serde(default)]
     before_ts: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

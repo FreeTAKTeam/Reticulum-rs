@@ -284,6 +284,19 @@ fn list_announces_applies_limit_and_before_ts() {
         .and_then(|value| value.as_array())
         .cloned()
         .expect("latest announces");
+    let latest_result = daemon
+        .handle_rpc(RpcRequest {
+            id: 12,
+            method: "list_announces".into(),
+            params: Some(json!({
+                "limit": 2
+            })),
+        })
+        .expect("list_announces with meta")
+        .result
+        .expect("result");
+    assert_eq!(latest_result["meta"]["contract_version"], "v2");
+    assert_eq!(latest_result["next_cursor"], "200");
     let latest_timestamps: Vec<i64> = latest
         .iter()
         .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
@@ -311,4 +324,73 @@ fn list_announces_applies_limit_and_before_ts() {
         .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
         .collect();
     assert_eq!(older_timestamps, vec![200, 100]);
+}
+
+#[test]
+fn list_announces_accepts_cursor_and_returns_next_cursor() {
+    let daemon = RpcDaemon::test_instance();
+    for (id, (peer, timestamp)) in [
+        ("peer-1", 100_i64),
+        ("peer-2", 200_i64),
+        ("peer-3", 300_i64),
+        ("peer-4", 400_i64),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        daemon
+            .handle_rpc(RpcRequest {
+                id: id as u64 + 1,
+                method: "announce_received".into(),
+                params: Some(json!({
+                    "peer": peer,
+                    "timestamp": timestamp,
+                })),
+            })
+            .expect("announce_received");
+    }
+
+    let page_1 = daemon
+        .handle_rpc(RpcRequest {
+            id: 20,
+            method: "list_announces".into(),
+            params: Some(json!({
+                "limit": 2
+            })),
+        })
+        .expect("page 1")
+        .result
+        .expect("page 1 result");
+
+    let cursor = page_1["next_cursor"]
+        .as_str()
+        .expect("next cursor")
+        .to_string();
+    let page_1_timestamps: Vec<i64> = page_1["announces"]
+        .as_array()
+        .expect("page 1 announces")
+        .iter()
+        .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
+        .collect();
+    assert_eq!(page_1_timestamps, vec![400, 300]);
+
+    let page_2 = daemon
+        .handle_rpc(RpcRequest {
+            id: 21,
+            method: "list_announces".into(),
+            params: Some(json!({
+                "limit": 2,
+                "cursor": cursor,
+            })),
+        })
+        .expect("page 2")
+        .result
+        .expect("page 2 result");
+    let page_2_timestamps: Vec<i64> = page_2["announces"]
+        .as_array()
+        .expect("page 2 announces")
+        .iter()
+        .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
+        .collect();
+    assert_eq!(page_2_timestamps, vec![200, 100]);
 }
