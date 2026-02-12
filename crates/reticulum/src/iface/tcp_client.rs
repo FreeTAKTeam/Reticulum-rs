@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -19,6 +20,22 @@ use super::{Interface, InterfaceContext};
 
 // TODO: Configure via features
 const PACKET_TRACE: bool = false;
+
+fn tx_diag_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RETICULUMD_DIAGNOSTICS")
+            .or_else(|_| std::env::var("RETICULUM_TRANSPORT_DIAGNOSTICS"))
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "debug"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
 
 pub struct TcpClient {
     addr: String,
@@ -81,7 +98,10 @@ impl TcpClient {
 
             log::info!("tcp_client connected to <{}>", addr);
 
-            const BUFFER_SIZE: usize = core::mem::size_of::<Packet>() * 2;
+            // Use protocol MTU-scale buffers, not size_of::<Packet>(), since packet
+            // struct size does not reflect serialized wire size and can silently drop
+            // larger payloads during serialization.
+            const BUFFER_SIZE: usize = 2048;
 
             // Start receive task
             let rx_task = {
@@ -183,15 +203,69 @@ impl TcpClient {
                                 if PACKET_TRACE {
                                     log::trace!("tcp_client: tx >> ({}) {}", iface_address, packet);
                                 }
+                                if tx_diag_enabled() {
+                                    eprintln!("[tp-diag] tcp_client tx_dequeue iface={} {}", iface_address, packet);
+                                    log::info!("[tp-diag] tcp_client tx_dequeue iface={} {}", iface_address, packet);
+                                }
                                 let mut output = OutputBuffer::new(&mut tx_buffer);
                                 if packet.serialize(&mut output).is_ok() {
-
                                     let mut hdlc_output = OutputBuffer::new(&mut hdlc_tx_buffer[..]);
-
                                     if Hdlc::encode(output.as_slice(), &mut hdlc_output).is_ok() {
-                                        let _ = stream.write_all(hdlc_output.as_slice()).await;
-                                        let _ = stream.flush().await;
+                                        if let Err(err) = stream.write_all(hdlc_output.as_slice()).await {
+                                            log::warn!("tcp_client: write_all failed on {}: {}", iface_address, err);
+                                            eprintln!(
+                                                "[tp-diag] tcp_client write_all failed iface={} err={}",
+                                                iface_address, err
+                                            );
+                                            stop.cancel();
+                                            break;
+                                        }
+                                        if let Err(err) = stream.flush().await {
+                                            log::warn!("tcp_client: flush failed on {}: {}", iface_address, err);
+                                            eprintln!(
+                                                "[tp-diag] tcp_client flush failed iface={} err={}",
+                                                iface_address, err
+                                            );
+                                            stop.cancel();
+                                            break;
+                                        }
+                                        if tx_diag_enabled() {
+                                            eprintln!(
+                                                "[tp-diag] tcp_client tx_write_ok iface={} wire_len={} raw_len={}",
+                                                iface_address,
+                                                hdlc_output.as_slice().len(),
+                                                output.as_slice().len()
+                                            );
+                                            log::info!(
+                                                "[tp-diag] tcp_client tx_write_ok iface={} wire_len={} raw_len={}",
+                                                iface_address,
+                                                hdlc_output.as_slice().len(),
+                                                output.as_slice().len()
+                                            );
+                                        }
+                                    } else {
+                                        log::warn!(
+                                            "tcp_client: failed to HDLC-encode packet on {} (raw_len={})",
+                                            iface_address,
+                                            output.as_slice().len()
+                                        );
+                                        eprintln!(
+                                            "[tp-diag] tcp_client hdlc_encode failed iface={} raw_len={}",
+                                            iface_address,
+                                            output.as_slice().len()
+                                        );
                                     }
+                                } else {
+                                    log::warn!(
+                                        "tcp_client: failed to serialize packet on {} (buffer_cap={})",
+                                        iface_address,
+                                        tx_buffer.len()
+                                    );
+                                    eprintln!(
+                                        "[tp-diag] tcp_client serialize failed iface={} buffer_cap={}",
+                                        iface_address,
+                                        tx_buffer.len()
+                                    );
                                 }
                             }
                         };

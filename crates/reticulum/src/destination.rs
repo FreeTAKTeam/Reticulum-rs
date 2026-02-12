@@ -529,8 +529,17 @@ impl Destination<PrivateIdentity, Input, Single> {
     ) -> Result<Packet, RnsError> {
         let mut packet_data = PacketDataBuffer::new();
 
-        let rand_hash = Hash::new_from_rand(rng);
-        let rand_hash = &rand_hash.as_slice()[..RAND_HASH_LENGTH];
+        // Python Reticulum encodes announce randomness as 5 random bytes
+        // followed by a 5-byte big-endian unix timestamp. Matching this
+        // layout keeps announce freshness/path ordering interoperable.
+        let mut rand_hash = [0u8; RAND_HASH_LENGTH];
+        let mut random_part = [0u8; RAND_HASH_LENGTH / 2];
+        let mut rng_mut = rng;
+        rng_mut.fill_bytes(&mut random_part);
+        rand_hash[..RAND_HASH_LENGTH / 2].copy_from_slice(&random_part);
+        let emitted_secs = now_secs().floor() as u64;
+        let emitted_be = emitted_secs.to_be_bytes();
+        rand_hash[RAND_HASH_LENGTH / 2..].copy_from_slice(&emitted_be[3..8]);
 
         let pub_key = self.identity.as_identity().public_key_bytes();
         let verifying_key = self.identity.as_identity().verifying_key_bytes();
@@ -548,7 +557,7 @@ impl Destination<PrivateIdentity, Input, Single> {
             .chain_safe_write(pub_key)
             .chain_safe_write(verifying_key)
             .chain_safe_write(self.desc.name.as_name_hash_slice())
-            .chain_safe_write(rand_hash);
+            .chain_safe_write(&rand_hash);
 
         if let Some(ratchet) = ratchet {
             packet_data.chain_safe_write(&ratchet);
@@ -566,7 +575,7 @@ impl Destination<PrivateIdentity, Input, Single> {
             .chain_safe_write(pub_key)
             .chain_safe_write(verifying_key)
             .chain_safe_write(self.desc.name.as_name_hash_slice())
-            .chain_safe_write(rand_hash);
+            .chain_safe_write(&rand_hash);
 
         if let Some(ratchet) = ratchet {
             packet_data.chain_safe_write(&ratchet);
@@ -702,7 +711,10 @@ pub fn new_out(identity: Identity, app_name: &str, aspect: &str) -> SingleOutput
 
 #[cfg(test)]
 mod tests {
+    use crate::ratchets::now_secs;
+    use core::num::Wrapping;
     use rand_core::OsRng;
+    use rand_core::{CryptoRng, RngCore};
     use tempfile::TempDir;
 
     use crate::buffer::OutputBuffer;
@@ -715,6 +727,56 @@ mod tests {
     use super::DestinationName;
     use super::SingleInputDestination;
     use super::RATCHET_LENGTH;
+
+    #[derive(Clone, Copy)]
+    struct FixedRng {
+        next: Wrapping<u8>,
+    }
+
+    impl FixedRng {
+        fn new(seed: u8) -> Self {
+            Self {
+                next: Wrapping(seed),
+            }
+        }
+    }
+
+    impl RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            let mut bytes = [0u8; 4];
+            self.fill_bytes(&mut bytes);
+            u32::from_le_bytes(bytes)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut bytes = [0u8; 8];
+            self.fill_bytes(&mut bytes);
+            u64::from_le_bytes(bytes)
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            for slot in dest.iter_mut() {
+                *slot = self.next.0;
+                self.next += Wrapping(1);
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for FixedRng {}
+
+    fn decode_announce_random_blob(announce: &crate::packet::Packet) -> [u8; 10] {
+        let payload = announce.data.as_slice();
+        let start = 32 + 32 + 10;
+        let end = start + 10;
+        let mut blob = [0u8; 10];
+        blob.copy_from_slice(&payload[start..end]);
+        blob
+    }
 
     #[test]
     fn create_announce() {
@@ -861,5 +923,28 @@ mod tests {
         let info = DestinationAnnounce::validate(&announce).expect("valid announce");
         assert!(info.ratchet.is_none());
         assert_eq!(info.app_data, app_data.as_slice());
+    }
+
+    #[test]
+    fn announce_random_blob_matches_python_layout() {
+        let priv_identity = PrivateIdentity::new_from_rand(OsRng);
+        let mut destination = SingleInputDestination::new(
+            priv_identity,
+            DestinationName::new("example_utilities", "announcesample.fruits"),
+        );
+        let before = now_secs().floor() as u64;
+        let announce = destination
+            .announce(FixedRng::new(0x11), None)
+            .expect("valid announce");
+        let after = now_secs().floor() as u64;
+
+        let blob = decode_announce_random_blob(&announce);
+        assert_eq!(&blob[..5], &[0x11, 0x12, 0x13, 0x14, 0x15]);
+
+        let mut ts_bytes = [0u8; 8];
+        ts_bytes[3..8].copy_from_slice(&blob[5..10]);
+        let emitted = u64::from_be_bytes(ts_bytes);
+        assert!(emitted >= before.saturating_sub(1));
+        assert!(emitted <= after.saturating_add(1));
     }
 }

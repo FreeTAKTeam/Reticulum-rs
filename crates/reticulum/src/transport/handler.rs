@@ -1,5 +1,22 @@
 use super::wire::should_encrypt_packet;
 use super::*;
+use std::sync::OnceLock;
+
+fn transport_diag_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RETICULUMD_DIAGNOSTICS")
+            .or_else(|_| std::env::var("RETICULUM_TRANSPORT_DIAGNOSTICS"))
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "debug"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
 
 impl TransportHandler {
     pub(super) async fn send_packet(&mut self, packet: Packet) {
@@ -41,6 +58,7 @@ impl TransportHandler {
                     outcome: SendPacketOutcome::DroppedMissingDestinationIdentity,
                     direct_iface: None,
                     broadcast: false,
+                    dispatch: TxDispatchTrace::default(),
                 };
             };
             let identity = destination.lock().await.identity;
@@ -63,6 +81,7 @@ impl TransportHandler {
                             outcome: SendPacketOutcome::DroppedCiphertextTooLarge,
                             direct_iface: None,
                             broadcast: false,
+                            dispatch: TxDispatchTrace::default(),
                         };
                     }
                     packet.data = buffer;
@@ -78,33 +97,91 @@ impl TransportHandler {
                         outcome: SendPacketOutcome::DroppedEncryptFailed,
                         direct_iface: None,
                         broadcast: false,
+                        dispatch: TxDispatchTrace::default(),
                     };
                 }
             }
         }
 
+        if transport_diag_enabled() {
+            if let Some(entry) = self.path_table.get(&packet.destination) {
+                eprintln!(
+                    "[tp-diag] route_lookup dst={} hops={} via_next_hop={} via_iface={}",
+                    packet.destination, entry.hops, entry.received_from, entry.iface
+                );
+                log::info!(
+                    "[tp-diag] route_lookup dst={} hops={} via_next_hop={} via_iface={}",
+                    packet.destination,
+                    entry.hops,
+                    entry.received_from,
+                    entry.iface
+                );
+            } else {
+                eprintln!("[tp-diag] route_lookup dst={} missing", packet.destination);
+                log::info!("[tp-diag] route_lookup dst={} missing", packet.destination);
+            }
+        }
+
         let (packet, maybe_iface) = self.path_table.handle_packet(&packet);
         if let Some(iface) = maybe_iface {
-            self.send(TxMessage {
-                tx_type: TxMessageType::Direct(iface),
-                packet,
-            })
-            .await;
+            let dispatch = self
+                .send(TxMessage {
+                    tx_type: TxMessageType::Direct(iface),
+                    packet,
+                })
+                .await;
+            if transport_diag_enabled() {
+                eprintln!(
+                    "[tp-diag] direct_send iface={} outcome={:?} matched={} sent={} failed={}",
+                    iface,
+                    SendPacketOutcome::SentDirect,
+                    dispatch.matched_ifaces,
+                    dispatch.sent_ifaces,
+                    dispatch.failed_ifaces
+                );
+                log::info!(
+                    "[tp-diag] direct_send iface={} outcome={:?} matched={} sent={} failed={}",
+                    iface,
+                    SendPacketOutcome::SentDirect,
+                    dispatch.matched_ifaces,
+                    dispatch.sent_ifaces,
+                    dispatch.failed_ifaces
+                );
+            }
             SendPacketTrace {
                 outcome: SendPacketOutcome::SentDirect,
                 direct_iface: Some(iface),
                 broadcast: false,
+                dispatch,
             }
         } else if self.config.broadcast || packet.header.packet_type == PacketType::Announce {
-            self.send(TxMessage {
-                tx_type: TxMessageType::Broadcast(None),
-                packet,
-            })
-            .await;
+            let dispatch = self
+                .send(TxMessage {
+                    tx_type: TxMessageType::Broadcast(None),
+                    packet,
+                })
+                .await;
+            if transport_diag_enabled() {
+                eprintln!(
+                    "[tp-diag] broadcast_send outcome={:?} matched={} sent={} failed={}",
+                    SendPacketOutcome::SentBroadcast,
+                    dispatch.matched_ifaces,
+                    dispatch.sent_ifaces,
+                    dispatch.failed_ifaces
+                );
+                log::info!(
+                    "[tp-diag] broadcast_send outcome={:?} matched={} sent={} failed={}",
+                    SendPacketOutcome::SentBroadcast,
+                    dispatch.matched_ifaces,
+                    dispatch.sent_ifaces,
+                    dispatch.failed_ifaces
+                );
+            }
             SendPacketTrace {
                 outcome: SendPacketOutcome::SentBroadcast,
                 direct_iface: None,
                 broadcast: true,
+                dispatch,
             }
         } else {
             log::trace!(
@@ -116,13 +193,14 @@ impl TransportHandler {
                 outcome: SendPacketOutcome::DroppedNoRoute,
                 direct_iface: None,
                 broadcast: false,
+                dispatch: TxDispatchTrace::default(),
             }
         }
     }
 
-    pub(super) async fn send(&self, message: TxMessage) {
+    pub(super) async fn send(&self, message: TxMessage) -> TxDispatchTrace {
         self.packet_cache.lock().await.update(&message.packet);
-        self.iface_manager.lock().await.send(message).await;
+        self.iface_manager.lock().await.send(message).await
     }
 
     pub(super) fn has_destination(&self, address: &AddressHash) -> bool {

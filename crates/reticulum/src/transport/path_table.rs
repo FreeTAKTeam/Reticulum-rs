@@ -3,7 +3,7 @@ use std::{collections::HashMap, time::Instant};
 use crate::{
     error::RnsError,
     hash::{AddressHash, Hash},
-    packet::{DestinationType, Header, HeaderType, IfacFlag, Packet, PacketType},
+    packet::{DestinationType, Header, HeaderType, Packet, PacketType},
 };
 use rmp::encode::write_array_len;
 
@@ -84,10 +84,11 @@ impl PathTable {
         self.map.insert(announce.destination, new_entry);
 
         log::info!(
-            "{} is now reachable over {} hops through {}",
+            "{} is now reachable over {} hops through {} on iface {}",
             announce.destination,
             hops,
             received_from,
+            iface,
         );
     }
 
@@ -106,7 +107,7 @@ impl PathTable {
         (
             Packet {
                 header: Header {
-                    ifac_flag: IfacFlag::Authenticated,
+                    ifac_flag: original_packet.header.ifac_flag,
                     header_type: HeaderType::Type2,
                     context_flag: original_packet.header.context_flag,
                     propagation_type: original_packet.header.propagation_type,
@@ -153,7 +154,7 @@ impl PathTable {
         (
             Packet {
                 header: Header {
-                    ifac_flag: IfacFlag::Authenticated,
+                    ifac_flag: original_packet.header.ifac_flag,
                     header_type: HeaderType::Type2,
                     context_flag: original_packet.header.context_flag,
                     propagation_type: original_packet.header.propagation_type,
@@ -175,5 +176,51 @@ impl PathTable {
 impl Default for PathTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::StaticBuffer;
+    use crate::packet::{ContextFlag, DestinationType, IfacFlag, PacketType, PropagationType};
+
+    #[test]
+    fn handle_packet_preserves_ifac_flag() {
+        let destination = AddressHash::new_from_hash(&Hash::new_from_slice(b"destination"));
+        let iface = AddressHash::new_from_hash(&Hash::new_from_slice(b"iface"));
+        let mut table = PathTable::new();
+        table.map.insert(
+            destination,
+            PathEntry {
+                timestamp: Instant::now(),
+                received_from: destination,
+                hops: 1,
+                iface,
+                packet_hash: Hash::new_from_slice(b"packet"),
+            },
+        );
+
+        let packet = Packet {
+            header: Header {
+                ifac_flag: IfacFlag::Open,
+                header_type: HeaderType::Type1,
+                context_flag: ContextFlag::Unset,
+                propagation_type: PropagationType::Broadcast,
+                destination_type: DestinationType::Single,
+                packet_type: PacketType::Data,
+                hops: 0,
+            },
+            ifac: None,
+            destination,
+            transport: None,
+            context: crate::packet::PacketContext::None,
+            data: StaticBuffer::new(),
+        };
+
+        let (forwarded, next_iface) = table.handle_packet(&packet);
+        assert_eq!(next_iface, Some(iface));
+        assert_eq!(forwarded.header.ifac_flag, IfacFlag::Open);
+        assert_eq!(forwarded.header.header_type, HeaderType::Type2);
     }
 }

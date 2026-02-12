@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::LocalSet;
@@ -30,7 +30,9 @@ use reticulum_daemon::announce_names::{
 use reticulum_daemon::config::DaemonConfig;
 use reticulum_daemon::direct_delivery::send_via_link;
 use reticulum_daemon::identity_store::load_or_create_identity;
-use reticulum_daemon::inbound_delivery::decode_inbound_payload;
+use reticulum_daemon::inbound_delivery::{
+    decode_inbound_payload, decode_inbound_payload_with_diagnostics,
+};
 use reticulum_daemon::lxmf_bridge::build_wire_message;
 use reticulum_daemon::receipt_bridge::{
     handle_receipt_event, track_receipt_mapping, ReceiptBridge, ReceiptEvent,
@@ -178,11 +180,31 @@ impl OutboundBridge for TransportBridge {
                 std::time::Duration::from_secs(20),
             )
             .await;
+            if diagnostics_enabled() {
+                let payload_starts_with_dst =
+                    payload.len() >= 16 && payload[..16] == destination[..];
+                let detail = format!(
+                    "payload_len={} payload_prefix={} starts_with_dst={}",
+                    payload.len(),
+                    payload_preview(&payload, 16),
+                    payload_starts_with_dst
+                );
+                log_delivery_trace(&message_id, &destination_hex, "payload", &detail);
+            }
             match result {
                 Ok(packet) => {
                     let packet_hash = hex::encode(packet.hash().to_bytes());
                     track_receipt_mapping(&receipt_map, &packet_hash, &message_id);
-                    let detail = format!("packet_hash={packet_hash}");
+                    let detail = if diagnostics_enabled() {
+                        format!(
+                            "packet_hash={} packet_data_len={} packet_data_prefix={}",
+                            packet_hash,
+                            packet.data.len(),
+                            payload_preview(packet.data.as_slice(), 16)
+                        )
+                    } else {
+                        format!("packet_hash={packet_hash}")
+                    };
                     log_delivery_trace(&message_id, &destination_hex, "link", &detail);
                     let _ = receipt_tx.send(ReceiptEvent {
                         message_id,
@@ -237,7 +259,22 @@ impl OutboundBridge for TransportBridge {
                     };
                     let packet_hash = hex::encode(packet.hash().to_bytes());
                     track_receipt_mapping(&receipt_map, &packet_hash, &message_id);
-                    log_delivery_trace(&message_id, &destination_hex, "opportunistic", "sending");
+                    if diagnostics_enabled() {
+                        let detail = format!(
+                            "sending packet_hash={} payload_len={} payload_prefix={}",
+                            packet_hash,
+                            opportunistic_payload.len(),
+                            payload_preview(opportunistic_payload, 16)
+                        );
+                        log_delivery_trace(&message_id, &destination_hex, "opportunistic", &detail);
+                    } else {
+                        log_delivery_trace(
+                            &message_id,
+                            &destination_hex,
+                            "opportunistic",
+                            "sending",
+                        );
+                    }
                     let trace = transport.send_packet_with_trace(packet).await;
                     let trace_detail = send_trace_detail(trace);
                     log_delivery_trace(
@@ -314,14 +351,39 @@ fn log_delivery_trace(message_id: &str, destination: &str, stage: &str, detail: 
     );
 }
 
+fn diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RETICULUMD_DIAGNOSTICS")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "debug"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn payload_preview(bytes: &[u8], limit: usize) -> String {
+    let end = bytes.len().min(limit);
+    hex::encode(&bytes[..end])
+}
+
 fn send_trace_detail(trace: SendPacketTrace) -> String {
     let direct_iface = trace
         .direct_iface
         .map(|iface| iface.to_string())
         .unwrap_or_else(|| "-".to_string());
     format!(
-        "outcome={:?} direct_iface={} broadcast={}",
-        trace.outcome, direct_iface, trace.broadcast
+        "outcome={:?} direct_iface={} broadcast={} dispatch(matched={},sent={},failed={})",
+        trace.outcome,
+        direct_iface,
+        trace.broadcast,
+        trace.dispatch.matched_ifaces,
+        trace.dispatch.sent_ifaces,
+        trace.dispatch.failed_ifaces
     )
 }
 
@@ -461,20 +523,21 @@ async fn main() {
                     )))
                     .await;
                 let iface_manager = transport_instance.iface_manager();
-                iface_manager.lock().await.spawn(
+                let server_iface = iface_manager.lock().await.spawn(
                     TcpServer::new(addr.clone(), iface_manager.clone()),
                     TcpServer::spawn,
                 );
+                eprintln!("[daemon] tcp_server enabled iface={} bind={}", server_iface, addr);
                 if let Some(config) = daemon_config.as_ref() {
                     for (host, port) in config.tcp_client_endpoints() {
                         let addr = format!("{}:{}", host, port);
-                        iface_manager
+                        let client_iface = iface_manager
                             .lock()
                             .await
                             .spawn(TcpClient::new(addr), TcpClient::spawn);
                         eprintln!(
-                            "[daemon] tcp_client enabled name={} host={} port={}",
-                            host, host, port
+                            "[daemon] tcp_client enabled iface={} name={} host={} port={}",
+                            client_iface, host, host, port
                         );
                     }
                 }
@@ -579,14 +642,44 @@ async fn main() {
                     loop {
                         if let Ok(event) = rx.recv().await {
                             let data = event.data.as_slice();
-                            eprintln!(
-                                "[daemon] rx data len={} dst={}",
-                                data.len(),
-                                hex::encode(event.destination.as_slice())
-                            );
+                            let destination_hex = hex::encode(event.destination.as_slice());
+                            if diagnostics_enabled() {
+                                eprintln!(
+                                    "[daemon-rx] dst={} len={} ratchet_used={} data_prefix={}",
+                                    destination_hex,
+                                    data.len(),
+                                    event.ratchet_used,
+                                    payload_preview(data, 16)
+                                );
+                            } else {
+                                eprintln!("[daemon] rx data len={} dst={}", data.len(), destination_hex);
+                            }
                             let mut destination = [0u8; 16];
                             destination.copy_from_slice(event.destination.as_slice());
-                            if let Some(record) = decode_inbound_payload(destination, data) {
+                            let record = if diagnostics_enabled() {
+                                let (record, diagnostics) =
+                                    decode_inbound_payload_with_diagnostics(destination, data);
+                                if let Some(ref decoded) = record {
+                                    eprintln!(
+                                        "[daemon-rx] decoded msg_id={} src={} dst={} title_len={} content_len={}",
+                                        decoded.id,
+                                        decoded.source,
+                                        decoded.destination,
+                                        decoded.title.len(),
+                                        decoded.content.len()
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "[daemon-rx] decode-failed dst={} attempts={}",
+                                        destination_hex,
+                                        diagnostics.summary()
+                                    );
+                                }
+                                record
+                            } else {
+                                decode_inbound_payload(destination, data)
+                            };
+                            if let Some(record) = record {
                                 let _ = daemon_inbound.accept_inbound(record);
                             }
                         }
