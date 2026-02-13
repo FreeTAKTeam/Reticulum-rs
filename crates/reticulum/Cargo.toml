@@ -42,7 +42,7 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 tokio = { version = "1.44.2", features = ["full"] }
 tokio-util = "0.7.15"
 
-rmp = "0.8.14"
+rmp = "0.8.15"
 rmp-serde = "1.1.2"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
