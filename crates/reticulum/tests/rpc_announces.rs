@@ -296,7 +296,7 @@ fn list_announces_applies_limit_and_before_ts() {
         .result
         .expect("result");
     assert_eq!(latest_result["meta"]["contract_version"], "v2");
-    assert_eq!(latest_result["next_cursor"], "200");
+    assert_eq!(latest_result["next_cursor"], "200:announce-200-peer-2-1");
     let latest_timestamps: Vec<i64> = latest
         .iter()
         .map(|entry| entry["timestamp"].as_i64().expect("timestamp"))
