@@ -167,34 +167,46 @@ impl MessagesStore {
         &self,
         limit: usize,
         before_ts: Option<i64>,
+        before_id: Option<&str>,
     ) -> rusqlite::Result<Vec<AnnounceRecord>> {
         let mut records = Vec::new();
+        let parse_row = |row: &rusqlite::Row| -> rusqlite::Result<AnnounceRecord> {
+            let capabilities_json: Option<String> = row.get(8)?;
+            let capabilities = capabilities_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                .unwrap_or_default();
+            let seen_count: i64 = row.get(6)?;
+            Ok(AnnounceRecord {
+                id: row.get(0)?,
+                peer: row.get(1)?,
+                timestamp: row.get(2)?,
+                name: row.get(3)?,
+                name_source: row.get(4)?,
+                first_seen: row.get(5)?,
+                seen_count: seen_count.max(0) as u64,
+                app_data_hex: row.get(7)?,
+                capabilities,
+                rssi: row.get(9)?,
+                snr: row.get(10)?,
+                q: row.get(11)?,
+            })
+        };
         if let Some(ts) = before_ts {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
-            )?;
-            let mut rows = stmt.query(params![ts, limit as i64])?;
-            while let Some(row) = rows.next()? {
-                let capabilities_json: Option<String> = row.get(8)?;
-                let capabilities = capabilities_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-                    .unwrap_or_default();
-                let seen_count: i64 = row.get(6)?;
-                records.push(AnnounceRecord {
-                    id: row.get(0)?,
-                    peer: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    name: row.get(3)?,
-                    name_source: row.get(4)?,
-                    first_seen: row.get(5)?,
-                    seen_count: seen_count.max(0) as u64,
-                    app_data_hex: row.get(7)?,
-                    capabilities,
-                    rssi: row.get(9)?,
-                    snr: row.get(10)?,
-                    q: row.get(11)?,
-                });
+            let query_with_id = "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE (timestamp < ?1 OR (timestamp = ?1 AND id < ?2)) ORDER BY timestamp DESC, id DESC LIMIT ?3";
+            let query_without_id = "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE timestamp < ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2";
+            if let Some(ann_id) = before_id {
+                let mut stmt = self.conn.prepare(query_with_id)?;
+                let mut rows = stmt.query(params![ts, ann_id, limit as i64])?;
+                while let Some(row) = rows.next()? {
+                    records.push(parse_row(row)?);
+                }
+            } else {
+                let mut stmt = self.conn.prepare(query_without_id)?;
+                let mut rows = stmt.query(params![ts, limit as i64])?;
+                while let Some(row) = rows.next()? {
+                    records.push(parse_row(row)?);
+                }
             }
         } else {
             let mut stmt = self.conn.prepare(
@@ -202,26 +214,7 @@ impl MessagesStore {
             )?;
             let mut rows = stmt.query(params![limit as i64])?;
             while let Some(row) = rows.next()? {
-                let capabilities_json: Option<String> = row.get(8)?;
-                let capabilities = capabilities_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
-                    .unwrap_or_default();
-                let seen_count: i64 = row.get(6)?;
-                records.push(AnnounceRecord {
-                    id: row.get(0)?,
-                    peer: row.get(1)?,
-                    timestamp: row.get(2)?,
-                    name: row.get(3)?,
-                    name_source: row.get(4)?,
-                    first_seen: row.get(5)?,
-                    seen_count: seen_count.max(0) as u64,
-                    app_data_hex: row.get(7)?,
-                    capabilities,
-                    rssi: row.get(9)?,
-                    snr: row.get(10)?,
-                    q: row.get(11)?,
-                });
+                records.push(parse_row(row)?);
             }
         }
         Ok(records)
