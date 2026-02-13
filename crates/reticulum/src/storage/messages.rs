@@ -167,13 +167,19 @@ impl MessagesStore {
         &self,
         limit: usize,
         before_ts: Option<i64>,
+        before_id: Option<&str>,
     ) -> rusqlite::Result<Vec<AnnounceRecord>> {
         let mut records = Vec::new();
         if let Some(ts) = before_ts {
-            let mut stmt = self.conn.prepare(
-                "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
-            )?;
-            let mut rows = stmt.query(params![ts, limit as i64])?;
+            let query_with_id = "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE (timestamp < ?1 OR (timestamp = ?1 AND id < ?2)) ORDER BY timestamp DESC, id DESC LIMIT ?3";
+            let query_without_id = "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE timestamp < ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2";
+            let mut rows = if let Some(ann_id) = before_id {
+                let mut stmt = self.conn.prepare(query_with_id)?;
+                stmt.query(params![ts, ann_id, limit as i64])?
+            } else {
+                let mut stmt = self.conn.prepare(query_without_id)?;
+                stmt.query(params![ts, limit as i64])?
+            };
             while let Some(row) = rows.next()? {
                 let capabilities_json: Option<String> = row.get(8)?;
                 let capabilities = capabilities_json

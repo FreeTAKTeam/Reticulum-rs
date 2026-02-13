@@ -351,15 +351,17 @@ impl RpcDaemon {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?
                     .unwrap_or_default();
                 let limit = parsed.limit.unwrap_or(200).clamp(1, 5000);
-                let before_ts = parsed
-                    .before_ts
-                    .or_else(|| parse_announce_cursor(parsed.cursor.as_deref()));
+                let (before_ts, before_id) = match parsed.before_ts {
+                    Some(timestamp) => (Some(timestamp), None),
+                    None => parse_announce_cursor(parsed.cursor.as_deref())
+                        .unwrap_or((None, None)),
+                };
                 let items = self
                     .store
-                    .list_announces(limit, before_ts)
+                    .list_announces(limit, before_ts, before_id.as_deref())
                     .map_err(std::io::Error::other)?;
                 let next_cursor = if items.len() >= limit {
-                    items.last().map(|record| record.timestamp.to_string())
+                    items.last().map(|record| format!("{}:{}", record.timestamp, record.id))
                 } else {
                     None
                 };
@@ -850,7 +852,7 @@ impl RpcDaemon {
                     .clone();
                 let announces = self
                     .store
-                    .list_announces(500, None)
+                    .list_announces(500, None, None)
                     .map_err(std::io::Error::other)?;
                 let mut by_peer: HashMap<String, PropagationNodeRecord> = HashMap::new();
                 for announce in announces {
@@ -1129,6 +1131,9 @@ impl RpcDaemon {
     }
 
     fn append_delivery_trace(&self, message_id: &str, status: String) {
+        const MAX_DELIVERY_TRACE_ENTRIES: usize = 32;
+        const MAX_TRACKED_MESSAGE_TRACES: usize = 2048;
+
         let timestamp = now_i64();
         let reason_code = delivery_reason_code(&status).map(ToOwned::to_owned);
         let mut guard = self
@@ -1141,9 +1146,36 @@ impl RpcDaemon {
             timestamp,
             reason_code,
         });
-        if entry.len() > 32 {
-            let drain_count = entry.len().saturating_sub(32);
+        if entry.len() > MAX_DELIVERY_TRACE_ENTRIES {
+            let drain_count = entry.len().saturating_sub(MAX_DELIVERY_TRACE_ENTRIES);
             entry.drain(0..drain_count);
+        }
+
+        if guard.len() > MAX_TRACKED_MESSAGE_TRACES {
+            let overflow = guard.len() - MAX_TRACKED_MESSAGE_TRACES;
+            let mut evicted_ids = Vec::with_capacity(overflow);
+            for key in guard.keys() {
+                if key != message_id {
+                    evicted_ids.push(key.clone());
+                    if evicted_ids.len() == overflow {
+                        break;
+                    }
+                }
+            }
+            for id in evicted_ids {
+                guard.remove(&id);
+            }
+
+            if guard.len() > MAX_TRACKED_MESSAGE_TRACES {
+                let still_over = guard.len() - MAX_TRACKED_MESSAGE_TRACES;
+                let mut fallback = Vec::with_capacity(still_over);
+                for key in guard.keys().take(still_over).cloned() {
+                    fallback.push(key);
+                }
+                for id in fallback {
+                    guard.remove(&id);
+                }
+            }
         }
     }
 
@@ -1379,16 +1411,21 @@ impl RpcDaemon {
     }
 }
 
-fn parse_announce_cursor(cursor: Option<&str>) -> Option<i64> {
+fn parse_announce_cursor(cursor: Option<&str>) -> Option<(i64, Option<String>)> {
     let raw = cursor?.trim();
     if raw.is_empty() {
         return None;
     }
-    if let Ok(timestamp) = raw.parse::<i64>() {
-        return Some(timestamp);
+    if let Some((timestamp_raw, id)) = raw.split_once(':') {
+        let timestamp = timestamp_raw.parse::<i64>().ok()?;
+        let before_id = if id.is_empty() {
+            None
+        } else {
+            Some(id.to_string())
+        };
+        return Some((timestamp, before_id));
     }
-    let tail = raw.rsplit(':').next()?;
-    tail.parse::<i64>().ok()
+    raw.parse::<i64>().ok().map(|timestamp| (timestamp, None))
 }
 
 fn delivery_reason_code(status: &str) -> Option<&'static str> {
