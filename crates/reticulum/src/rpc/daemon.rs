@@ -336,7 +336,10 @@ impl RpcDaemon {
                     .map_err(std::io::Error::other)?;
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "messages": items })),
+                    result: Some(json!({
+                        "messages": items,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -385,7 +388,10 @@ impl RpcDaemon {
                 });
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "peers": peers })),
+                    result: Some(json!({
+                        "peers": peers,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -397,7 +403,10 @@ impl RpcDaemon {
                     .clone();
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "interfaces": interfaces })),
+                    result: Some(json!({
+                        "interfaces": interfaces,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }

@@ -54,6 +54,7 @@ fn interfaces_roundtrip_via_rpc() {
         })
         .expect("list interfaces");
     let result = list.result.expect("result");
+    assert_eq!(result["meta"]["contract_version"], "v2");
     let interfaces = result
         .get("interfaces")
         .and_then(|v| v.as_array())
@@ -82,6 +83,7 @@ fn peer_sync_and_unpeer_work() {
         })
         .expect("list peers");
     let result = peers.result.expect("result");
+    assert_eq!(result["meta"]["contract_version"], "v2");
     let peers = result
         .get("peers")
         .and_then(|v| v.as_array())
@@ -130,6 +132,7 @@ fn send_message_v2_persists_lxmf_metadata() {
         })
         .expect("list");
     let result = list.result.expect("result");
+    assert_eq!(result["meta"]["contract_version"], "v2");
     let messages = result
         .get("messages")
         .and_then(|v| v.as_array())
