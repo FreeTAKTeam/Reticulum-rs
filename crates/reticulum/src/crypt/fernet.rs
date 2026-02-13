@@ -135,7 +135,20 @@ impl<R: CryptoRngCore + Copy> Fernet<R> {
         text: PlainText,
         out_buf: &'a mut [u8],
     ) -> Result<Token<'a>, RnsError> {
-        if out_buf.len() <= FERNET_OVERHEAD_SIZE {
+        let block_count = text
+            .0
+            .len()
+            .checked_div(AES_BLOCK_SIZE)
+            .and_then(|blocks| blocks.checked_add(1))
+            .ok_or(RnsError::InvalidArgument)?;
+        let padded_cipher_len = block_count
+            .checked_mul(AES_BLOCK_SIZE)
+            .ok_or(RnsError::InvalidArgument)?;
+        let required_len = FERNET_OVERHEAD_SIZE
+            .checked_add(padded_cipher_len)
+            .ok_or(RnsError::InvalidArgument)?;
+
+        if out_buf.len() < required_len {
             return Err(RnsError::InvalidArgument);
         }
 
@@ -149,7 +162,7 @@ impl<R: CryptoRngCore + Copy> Fernet<R> {
 
         let chiper_len = AesCbcEnc::new(&self.enc_key, &iv)
             .encrypt_padded_b2b_mut::<Pkcs7>(text.0, &mut out_buf[out_len..])
-            .unwrap()
+            .map_err(|_| RnsError::InvalidArgument)?
             .len();
 
         out_len += chiper_len;
@@ -225,7 +238,7 @@ impl<R: CryptoRngCore + Copy> Fernet<R> {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypt::fernet::Fernet;
+    use crate::crypt::fernet::{Fernet, AES_BLOCK_SIZE, FERNET_OVERHEAD_SIZE};
     use core::str;
     use rand_core::OsRng;
 
@@ -259,6 +272,16 @@ mod tests {
         let test_msg: &str = "#FERNET_TEST_MESSAGE#";
 
         let mut out_buf = [0u8; 12];
+        assert!(fernet.encrypt(test_msg.into(), &mut out_buf[..]).is_err());
+    }
+
+    #[test]
+    fn rejects_buffer_too_small_for_padding_without_panicking() {
+        let fernet = Fernet::new_rand(OsRng);
+        let test_msg: &str = "hello";
+
+        // More than overhead but less than required encrypted token size.
+        let mut out_buf = [0u8; FERNET_OVERHEAD_SIZE + AES_BLOCK_SIZE - 1];
         assert!(fernet.encrypt(test_msg.into(), &mut out_buf[..]).is_err());
     }
 }
