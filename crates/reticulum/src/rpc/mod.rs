@@ -76,6 +76,8 @@ pub struct TicketRecord {
 pub struct DeliveryTraceEntry {
     pub status: String,
     pub timestamp: i64,
+    #[serde(default)]
+    pub reason_code: Option<String>,
 }
 
 pub struct RpcDaemon {

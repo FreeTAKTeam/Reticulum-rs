@@ -1121,12 +1121,17 @@ impl RpcDaemon {
 
     fn append_delivery_trace(&self, message_id: &str, status: String) {
         let timestamp = now_i64();
+        let reason_code = delivery_reason_code(&status).map(ToOwned::to_owned);
         let mut guard = self
             .delivery_traces
             .lock()
             .expect("delivery traces mutex poisoned");
         let entry = guard.entry(message_id.to_string()).or_default();
-        entry.push(DeliveryTraceEntry { status, timestamp });
+        entry.push(DeliveryTraceEntry {
+            status,
+            timestamp,
+            reason_code,
+        });
         if entry.len() > 32 {
             let drain_count = entry.len().saturating_sub(32);
             entry.drain(0..drain_count);

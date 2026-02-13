@@ -405,6 +405,9 @@ fn message_delivery_trace_records_transitions() {
     assert!(transitions
         .iter()
         .any(|entry| entry["status"] == "delivered"));
+    assert!(transitions
+        .iter()
+        .any(|entry| entry["status"] == "delivered" && entry["reason_code"].is_null()));
 }
 
 #[test]
@@ -442,4 +445,23 @@ fn receipt_event_exposes_reason_code() {
 
     let receipt_event = receipt_event.expect("receipt event");
     assert_eq!(receipt_event.payload["reason_code"], "receipt_timeout");
+
+    let trace = daemon
+        .handle_rpc(RpcRequest {
+            id: 29,
+            method: "message_delivery_trace".into(),
+            params: Some(json!({
+                "message_id": "trace-reason-1"
+            })),
+        })
+        .expect("message_delivery_trace");
+    let trace_result = trace.result.expect("result");
+    let timeout_transition = trace_result["transitions"]
+        .as_array()
+        .expect("transitions")
+        .iter()
+        .find(|entry| entry["status"] == "failed: receipt timeout")
+        .cloned()
+        .expect("failed transition");
+    assert_eq!(timeout_transition["reason_code"], "receipt_timeout");
 }
