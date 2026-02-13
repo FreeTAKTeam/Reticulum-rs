@@ -54,7 +54,7 @@ tempfile = { version = "3.19.1", optional = true }
 bzip2 = "0.4"
 
 # Logging
-log = "0.4.27"
+log = "0.4.29"
 
 [features]
 default = ["alloc"]
