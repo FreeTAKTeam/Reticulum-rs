@@ -1412,7 +1412,7 @@ impl RpcDaemon {
     }
 }
 
-fn parse_announce_cursor(cursor: Option<&str>) -> Option<(i64, Option<String>)> {
+fn parse_announce_cursor(cursor: Option<&str>) -> Option<(Option<i64>, Option<String>)> {
     let raw = cursor?.trim();
     if raw.is_empty() {
         return None;
@@ -1424,9 +1424,11 @@ fn parse_announce_cursor(cursor: Option<&str>) -> Option<(i64, Option<String>)> 
         } else {
             Some(id.to_string())
         };
-        return Some((timestamp, before_id));
+        return Some((Some(timestamp), before_id));
     }
-    raw.parse::<i64>().ok().map(|timestamp| (timestamp, None))
+    raw.parse::<i64>()
+        .ok()
+        .map(|timestamp| (Some(timestamp), None))
 }
 
 fn delivery_reason_code(status: &str) -> Option<&'static str> {
