@@ -87,17 +87,19 @@ pub(super) async fn handle_path_request<'a>(
             }
         }
 
-        if let Some(packet) =
-            handler
-                .path_requests
-                .generate_recursive(&request.destination, Some(iface), None)
-        {
-            handler
-                .send(TxMessage {
-                    tx_type: TxMessageType::Broadcast(Some(iface)),
-                    packet,
-                })
-                .await;
+        if handler.config.retransmit {
+            if let Some(packet) =
+                handler
+                    .path_requests
+                    .generate_recursive(&request.destination, Some(iface), None)
+            {
+                handler
+                    .send(TxMessage {
+                        tx_type: TxMessageType::Broadcast(Some(iface)),
+                        packet,
+                    })
+                    .await;
+            }
         }
     }
 }
@@ -118,6 +120,7 @@ pub(super) async fn handle_fixed_destinations<'a>(
 pub(super) async fn handle_link_request_as_destination<'a>(
     destination: Arc<Mutex<SingleInputDestination>>,
     packet: &Packet,
+    iface: AddressHash,
     mut handler: MutexGuard<'a, TransportHandler>,
 ) {
     let mut destination = destination.lock().await;
@@ -144,7 +147,14 @@ pub(super) async fn handle_link_request_as_destination<'a>(
                         packet.destination,
                         link.id()
                     );
-                    handler.send_packet(link.prove()).await;
+                    // Link-request proofs must go back over the interface that delivered
+                    // the request so multi-hop requestors can activate the link.
+                    handler
+                        .send(TxMessage {
+                            tx_type: TxMessageType::Direct(iface),
+                            packet: link.prove(),
+                        })
+                        .await;
 
                     log::debug!(
                         "tp({}): save input link {} for destination {}",
@@ -201,7 +211,7 @@ pub(super) async fn handle_link_request<'a>(
             packet.destination
         );
 
-        handle_link_request_as_destination(destination, packet, handler).await;
+        handle_link_request_as_destination(destination, packet, iface, handler).await;
     } else if let Some(entry) = handler.path_table.next_hop_full(&packet.destination) {
         log::trace!(
             "tp({}): handle link request for remote destination {}",

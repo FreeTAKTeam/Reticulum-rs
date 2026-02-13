@@ -14,9 +14,11 @@ impl RpcDaemon {
             delivery_policy: Mutex::new(DeliveryPolicy::default()),
             propagation_state: Mutex::new(PropagationState::default()),
             propagation_payloads: Mutex::new(HashMap::new()),
+            outbound_propagation_node: Mutex::new(None),
             paper_ingest_seen: Mutex::new(HashSet::new()),
             stamp_policy: Mutex::new(StampPolicy::default()),
             ticket_cache: Mutex::new(HashMap::new()),
+            delivery_traces: Mutex::new(HashMap::new()),
             outbound_bridge: None,
             announce_bridge: None,
         }
@@ -39,9 +41,11 @@ impl RpcDaemon {
             delivery_policy: Mutex::new(DeliveryPolicy::default()),
             propagation_state: Mutex::new(PropagationState::default()),
             propagation_payloads: Mutex::new(HashMap::new()),
+            outbound_propagation_node: Mutex::new(None),
             paper_ingest_seen: Mutex::new(HashSet::new()),
             stamp_policy: Mutex::new(StampPolicy::default()),
             ticket_cache: Mutex::new(HashMap::new()),
+            delivery_traces: Mutex::new(HashMap::new()),
             outbound_bridge: Some(outbound_bridge),
             announce_bridge: None,
         }
@@ -65,9 +69,11 @@ impl RpcDaemon {
             delivery_policy: Mutex::new(DeliveryPolicy::default()),
             propagation_state: Mutex::new(PropagationState::default()),
             propagation_payloads: Mutex::new(HashMap::new()),
+            outbound_propagation_node: Mutex::new(None),
             paper_ingest_seen: Mutex::new(HashSet::new()),
             stamp_policy: Mutex::new(StampPolicy::default()),
             ticket_cache: Mutex::new(HashMap::new()),
+            delivery_traces: Mutex::new(HashMap::new()),
             outbound_bridge,
             announce_bridge,
         }
@@ -137,7 +143,9 @@ impl RpcDaemon {
     }
 
     pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
-        self.accept_announce_with_details(peer, timestamp, None, None)
+        self.accept_announce_with_metadata(
+            peer, timestamp, None, None, None, None, None, None, None,
+        )
     }
 
     pub fn accept_announce_with_details(
@@ -147,16 +155,75 @@ impl RpcDaemon {
         name: Option<String>,
         name_source: Option<String>,
     ) -> Result<(), std::io::Error> {
+        self.accept_announce_with_metadata(
+            peer,
+            timestamp,
+            name,
+            name_source,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn accept_announce_with_metadata(
+        &self,
+        peer: String,
+        timestamp: i64,
+        name: Option<String>,
+        name_source: Option<String>,
+        app_data_hex: Option<String>,
+        capabilities: Option<Vec<String>>,
+        rssi: Option<f64>,
+        snr: Option<f64>,
+        q: Option<f64>,
+    ) -> Result<(), std::io::Error> {
         let record = self.upsert_peer(peer, timestamp, name, name_source);
+        let capability_list = if let Some(caps) = capabilities {
+            normalize_capabilities(caps)
+        } else {
+            parse_capabilities_from_app_data_hex(app_data_hex.as_deref())
+        };
+
+        let announce_record = AnnounceRecord {
+            id: format!(
+                "announce-{}-{}-{}",
+                record.last_seen, record.peer, record.seen_count
+            ),
+            peer: record.peer.clone(),
+            timestamp: record.last_seen,
+            name: record.name.clone(),
+            name_source: record.name_source.clone(),
+            first_seen: record.first_seen,
+            seen_count: record.seen_count,
+            app_data_hex: clean_optional_text(app_data_hex),
+            capabilities: capability_list.clone(),
+            rssi,
+            snr,
+            q,
+        };
+        self.store
+            .insert_announce(&announce_record)
+            .map_err(std::io::Error::other)?;
+
         let event = RpcEvent {
             event_type: "announce_received".into(),
             payload: json!({
+                "id": announce_record.id,
                 "peer": record.peer,
                 "timestamp": record.last_seen,
                 "name": record.name,
                 "name_source": record.name_source,
                 "first_seen": record.first_seen,
                 "seen_count": record.seen_count,
+                "app_data_hex": announce_record.app_data_hex,
+                "capabilities": capability_list,
+                "rssi": rssi,
+                "snr": snr,
+                "q": q,
             }),
         };
         self.push_event(event.clone());
@@ -269,7 +336,40 @@ impl RpcDaemon {
                     .map_err(std::io::Error::other)?;
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "messages": items })),
+                    result: Some(json!({
+                        "messages": items,
+                        "meta": self.response_meta(),
+                    })),
+                    error: None,
+                })
+            }
+            "list_announces" => {
+                let parsed = request
+                    .params
+                    .map(serde_json::from_value::<ListAnnouncesParams>)
+                    .transpose()
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?
+                    .unwrap_or_default();
+                let limit = parsed.limit.unwrap_or(200).clamp(1, 5000);
+                let before_ts = parsed
+                    .before_ts
+                    .or_else(|| parse_announce_cursor(parsed.cursor.as_deref()));
+                let items = self
+                    .store
+                    .list_announces(limit, before_ts)
+                    .map_err(std::io::Error::other)?;
+                let next_cursor = if items.len() >= limit {
+                    items.last().map(|record| record.timestamp.to_string())
+                } else {
+                    None
+                };
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "announces": items,
+                        "next_cursor": next_cursor,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -288,7 +388,10 @@ impl RpcDaemon {
                 });
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "peers": peers })),
+                    result: Some(json!({
+                        "peers": peers,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -300,7 +403,10 @@ impl RpcDaemon {
                     .clone();
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(json!({ "interfaces": interfaces })),
+                    result: Some(json!({
+                        "interfaces": interfaces,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -491,17 +597,50 @@ impl RpcDaemon {
                 self.store
                     .update_receipt_status(&parsed.message_id, &parsed.status)
                     .map_err(std::io::Error::other)?;
+                let message_id = parsed.message_id;
+                let status = parsed.status;
+                self.append_delivery_trace(&message_id, status.clone());
+                let reason_code = delivery_reason_code(&status);
                 let event = RpcEvent {
                     event_type: "receipt".into(),
-                    payload: json!({ "message_id": parsed.message_id, "status": parsed.status }),
+                    payload: json!({
+                        "message_id": message_id,
+                        "status": status,
+                        "reason_code": reason_code,
+                    }),
                 };
                 self.push_event(event.clone());
                 let _ = self.events.send(event);
                 Ok(RpcResponse {
                     id: request.id,
-                    result: Some(
-                        json!({ "message_id": parsed.message_id, "status": parsed.status }),
-                    ),
+                    result: Some(json!({
+                        "message_id": message_id,
+                        "status": status,
+                        "reason_code": reason_code,
+                    })),
+                    error: None,
+                })
+            }
+            "message_delivery_trace" => {
+                let params = request.params.ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
+                })?;
+                let parsed: MessageDeliveryTraceParams = serde_json::from_value(params)
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let traces = self
+                    .delivery_traces
+                    .lock()
+                    .expect("delivery traces mutex poisoned")
+                    .get(parsed.message_id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "message_id": parsed.message_id,
+                        "transitions": traces,
+                        "meta": self.response_meta(),
+                    })),
                     error: None,
                 })
             }
@@ -652,6 +791,101 @@ impl RpcDaemon {
                     result: Some(json!({
                         "transient_id": parsed.transient_id,
                         "payload_hex": payload,
+                    })),
+                    error: None,
+                })
+            }
+            "get_outbound_propagation_node" => {
+                let selected = self
+                    .outbound_propagation_node
+                    .lock()
+                    .expect("propagation node mutex poisoned")
+                    .clone();
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "peer": selected,
+                        "meta": self.response_meta(),
+                    })),
+                    error: None,
+                })
+            }
+            "set_outbound_propagation_node" => {
+                let parsed = request
+                    .params
+                    .map(serde_json::from_value::<SetOutboundPropagationNodeParams>)
+                    .transpose()
+                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let peer = parsed
+                    .and_then(|value| value.peer)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                {
+                    let mut guard = self
+                        .outbound_propagation_node
+                        .lock()
+                        .expect("propagation node mutex poisoned");
+                    *guard = peer.clone();
+                }
+                let event = RpcEvent {
+                    event_type: "propagation_node_selected".into(),
+                    payload: json!({ "peer": peer }),
+                };
+                self.push_event(event.clone());
+                let _ = self.events.send(event);
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "peer": peer,
+                        "meta": self.response_meta(),
+                    })),
+                    error: None,
+                })
+            }
+            "list_propagation_nodes" => {
+                let selected = self
+                    .outbound_propagation_node
+                    .lock()
+                    .expect("propagation node mutex poisoned")
+                    .clone();
+                let announces = self
+                    .store
+                    .list_announces(500, None)
+                    .map_err(std::io::Error::other)?;
+                let mut by_peer: HashMap<String, PropagationNodeRecord> = HashMap::new();
+                for announce in announces {
+                    let key = announce.peer.clone();
+                    let entry =
+                        by_peer
+                            .entry(key.clone())
+                            .or_insert_with(|| PropagationNodeRecord {
+                                peer: key.clone(),
+                                name: announce.name.clone(),
+                                last_seen: announce.timestamp,
+                                capabilities: announce.capabilities.clone(),
+                                selected: selected.as_deref() == Some(key.as_str()),
+                            });
+                    if announce.timestamp > entry.last_seen {
+                        entry.last_seen = announce.timestamp;
+                        entry.name = announce.name.clone();
+                        entry.capabilities = announce.capabilities.clone();
+                    }
+                    if selected.as_deref() == Some(key.as_str()) {
+                        entry.selected = true;
+                    }
+                }
+
+                let mut nodes = by_peer.into_values().collect::<Vec<_>>();
+                nodes.sort_by(|a, b| {
+                    b.last_seen
+                        .cmp(&a.last_seen)
+                        .then_with(|| a.peer.cmp(&b.peer))
+                });
+                Ok(RpcResponse {
+                    id: request.id,
+                    result: Some(json!({
+                        "nodes": nodes,
+                        "meta": self.response_meta(),
                     })),
                     error: None,
                 })
@@ -810,21 +1044,24 @@ impl RpcDaemon {
                 let parsed: AnnounceReceivedParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = parsed.timestamp.unwrap_or_else(now_i64);
-                let record =
-                    self.upsert_peer(parsed.peer, timestamp, parsed.name, parsed.name_source);
-                let event = RpcEvent {
-                    event_type: "announce_received".into(),
-                    payload: json!({
-                        "peer": record.peer.clone(),
-                        "timestamp": record.last_seen,
-                        "name": record.name.clone(),
-                        "name_source": record.name_source.clone(),
-                        "first_seen": record.first_seen,
-                        "seen_count": record.seen_count,
-                    }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
+                let peer = parsed.peer.clone();
+                self.accept_announce_with_metadata(
+                    parsed.peer,
+                    timestamp,
+                    parsed.name,
+                    parsed.name_source,
+                    parsed.app_data_hex,
+                    parsed.capabilities,
+                    parsed.rssi,
+                    parsed.snr,
+                    parsed.q,
+                )?;
+                let record = self
+                    .peers
+                    .lock()
+                    .expect("peers mutex poisoned")
+                    .get(peer.as_str())
+                    .cloned();
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "peer": record })),
@@ -849,6 +1086,9 @@ impl RpcDaemon {
                     let mut guard = self.peers.lock().expect("peers mutex poisoned");
                     guard.clear();
                 }
+                self.store
+                    .clear_announces()
+                    .map_err(std::io::Error::other)?;
                 Ok(RpcResponse {
                     id: request.id,
                     result: Some(json!({ "cleared": "peers" })),
@@ -857,8 +1097,18 @@ impl RpcDaemon {
             }
             "clear_all" => {
                 self.store.clear_messages().map_err(std::io::Error::other)?;
+                self.store
+                    .clear_announces()
+                    .map_err(std::io::Error::other)?;
                 {
                     let mut guard = self.peers.lock().expect("peers mutex poisoned");
+                    guard.clear();
+                }
+                {
+                    let mut guard = self
+                        .delivery_traces
+                        .lock()
+                        .expect("delivery traces mutex poisoned");
                     guard.clear();
                 }
                 Ok(RpcResponse {
@@ -878,6 +1128,33 @@ impl RpcDaemon {
         }
     }
 
+    fn append_delivery_trace(&self, message_id: &str, status: String) {
+        let timestamp = now_i64();
+        let reason_code = delivery_reason_code(&status).map(ToOwned::to_owned);
+        let mut guard = self
+            .delivery_traces
+            .lock()
+            .expect("delivery traces mutex poisoned");
+        let entry = guard.entry(message_id.to_string()).or_default();
+        entry.push(DeliveryTraceEntry {
+            status,
+            timestamp,
+            reason_code,
+        });
+        if entry.len() > 32 {
+            let drain_count = entry.len().saturating_sub(32);
+            entry.drain(0..drain_count);
+        }
+    }
+
+    fn response_meta(&self) -> JsonValue {
+        json!({
+            "contract_version": "v2",
+            "profile": JsonValue::Null,
+            "rpc_endpoint": JsonValue::Null,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn store_outbound(
         &self,
@@ -893,6 +1170,7 @@ impl RpcDaemon {
         include_ticket: Option<bool>,
     ) -> Result<RpcResponse, std::io::Error> {
         let timestamp = now_i64();
+        self.append_delivery_trace(&id, "queued".to_string());
         let mut record = MessageRecord {
             id: id.clone(),
             source,
@@ -908,6 +1186,7 @@ impl RpcDaemon {
         self.store
             .insert_message(&record)
             .map_err(std::io::Error::other)?;
+        self.append_delivery_trace(&id, "sending".to_string());
         let deliver_result = if let Some(bridge) = &self.outbound_bridge {
             bridge.deliver(&record)
         } else {
@@ -918,9 +1197,17 @@ impl RpcDaemon {
             let status = format!("failed: {err}");
             let _ = self.store.update_receipt_status(&id, &status);
             record.receipt_status = Some(status);
+            let resolved_status = record.receipt_status.clone().unwrap_or_default();
+            self.append_delivery_trace(&id, resolved_status.clone());
+            let reason_code = delivery_reason_code(&resolved_status);
             let event = RpcEvent {
                 event_type: "outbound".into(),
-                payload: json!({ "message": record, "method": method, "error": err.to_string() }),
+                payload: json!({
+                    "message": record,
+                    "method": method,
+                    "error": err.to_string(),
+                    "reason_code": reason_code,
+                }),
             };
             self.push_event(event.clone());
             let _ = self.events.send(event);
@@ -933,9 +1220,15 @@ impl RpcDaemon {
                 }),
             });
         }
+        let sent_status = format!("sent: {}", method.as_deref().unwrap_or("direct"));
+        self.append_delivery_trace(&id, sent_status.clone());
         let event = RpcEvent {
             event_type: "outbound".into(),
-            payload: json!({ "message": record, "method": method }),
+            payload: json!({
+                "message": record,
+                "method": method,
+                "reason_code": delivery_reason_code(&sent_status),
+            }),
         };
         self.push_event(event.clone());
         let _ = self.events.send(event);
@@ -960,6 +1253,7 @@ impl RpcDaemon {
             "status",
             "daemon_status_ex",
             "list_messages",
+            "list_announces",
             "list_peers",
             "send_message",
             "send_message_v2",
@@ -975,10 +1269,14 @@ impl RpcDaemon {
             "propagation_enable",
             "propagation_ingest",
             "propagation_fetch",
+            "get_outbound_propagation_node",
+            "set_outbound_propagation_node",
+            "list_propagation_nodes",
             "paper_ingest_uri",
             "stamp_policy_get",
             "stamp_policy_set",
             "ticket_generate",
+            "message_delivery_trace",
         ]
     }
 
@@ -1079,4 +1377,42 @@ impl RpcDaemon {
         self.push_event(event.clone());
         let _ = self.events.send(event);
     }
+}
+
+fn parse_announce_cursor(cursor: Option<&str>) -> Option<i64> {
+    let raw = cursor?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(timestamp) = raw.parse::<i64>() {
+        return Some(timestamp);
+    }
+    let tail = raw.rsplit(':').next()?;
+    tail.parse::<i64>().ok()
+}
+
+fn delivery_reason_code(status: &str) -> Option<&'static str> {
+    let normalized = status.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if normalized.contains("receipt timeout") {
+        return Some("receipt_timeout");
+    }
+    if normalized.contains("timeout") {
+        return Some("timeout");
+    }
+    if normalized.contains("no route")
+        || normalized.contains("no path")
+        || normalized.contains("no known path")
+    {
+        return Some("no_path");
+    }
+    if normalized.contains("no propagation relay selected") {
+        return Some("relay_unset");
+    }
+    if normalized.contains("retry budget exhausted") {
+        return Some("retry_budget_exhausted");
+    }
+    None
 }

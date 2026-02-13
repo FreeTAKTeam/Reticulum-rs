@@ -32,7 +32,10 @@ pub async fn send_via_link(
                 ));
             }
 
-            match timeout(remaining, events.recv()).await {
+            // Poll in short slices so activation can be detected even if the
+            // activation event was emitted before subscribing.
+            let wait_slice = remaining.min(Duration::from_millis(250));
+            match timeout(wait_slice, events.recv()).await {
                 Ok(Ok(event)) => {
                     if event.id == link_id {
                         if let LinkEvent::Activated = event.event {
@@ -47,12 +50,7 @@ pub async fn send_via_link(
                         "link event channel closed",
                     ));
                 }
-                Err(_) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "link activation timed out",
-                    ));
-                }
+                Err(_) => continue,
             }
         }
     }

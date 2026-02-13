@@ -73,7 +73,9 @@ fn send_message_persists() {
         })
         .unwrap();
 
-    let items = resp.result.unwrap()["messages"].as_array().unwrap().clone();
+    let result = resp.result.unwrap();
+    assert_eq!(result["meta"]["contract_version"], "v2");
+    let items = result["messages"].as_array().unwrap().clone();
     assert_eq!(items.len(), 1);
 }
 
@@ -101,7 +103,9 @@ fn receive_message_persists_and_emits_event() {
         })
         .unwrap();
 
-    let items = resp.result.unwrap()["messages"].as_array().unwrap().clone();
+    let result = resp.result.unwrap();
+    assert_eq!(result["meta"]["contract_version"], "v2");
+    let items = result["messages"].as_array().unwrap().clone();
     assert_eq!(items.len(), 1);
 
     let event = daemon.take_event().expect("event");
@@ -120,6 +124,8 @@ fn list_peers_returns_empty_array() {
         })
         .unwrap();
 
-    let peers = resp.result.unwrap()["peers"].as_array().unwrap().clone();
+    let result = resp.result.unwrap();
+    assert_eq!(result["meta"]["contract_version"], "v2");
+    let peers = result["peers"].as_array().unwrap().clone();
     assert_eq!(peers.len(), 0);
 }

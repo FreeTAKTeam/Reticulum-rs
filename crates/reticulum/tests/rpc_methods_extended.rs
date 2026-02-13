@@ -21,6 +21,8 @@ fn daemon_status_ex_exposes_capabilities() {
         .expect("capabilities");
     assert!(caps.iter().any(|c| c == "send_message_v2"));
     assert!(caps.iter().any(|c| c == "set_interfaces"));
+    assert!(caps.iter().any(|c| c == "list_announces"));
+    assert!(caps.iter().any(|c| c == "message_delivery_trace"));
 }
 
 #[test]
@@ -52,6 +54,7 @@ fn interfaces_roundtrip_via_rpc() {
         })
         .expect("list interfaces");
     let result = list.result.expect("result");
+    assert_eq!(result["meta"]["contract_version"], "v2");
     let interfaces = result
         .get("interfaces")
         .and_then(|v| v.as_array())
@@ -80,6 +83,7 @@ fn peer_sync_and_unpeer_work() {
         })
         .expect("list peers");
     let result = peers.result.expect("result");
+    assert_eq!(result["meta"]["contract_version"], "v2");
     let peers = result
         .get("peers")
         .and_then(|v| v.as_array())
@@ -128,6 +132,7 @@ fn send_message_v2_persists_lxmf_metadata() {
         })
         .expect("list");
     let result = list.result.expect("result");
+    assert_eq!(result["meta"]["contract_version"], "v2");
     let messages = result
         .get("messages")
         .and_then(|v| v.as_array())
@@ -302,4 +307,164 @@ fn ticket_generation_rejects_ttl_overflow() {
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("ttl_secs"));
+}
+
+#[test]
+fn propagation_node_selection_roundtrip() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 20,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-a",
+                "timestamp": 200,
+                "capabilities": ["propagation", "attachments"]
+            })),
+        })
+        .expect("announce_received");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 21,
+            method: "set_outbound_propagation_node".into(),
+            params: Some(json!({
+                "peer": "relay-a"
+            })),
+        })
+        .expect("set_outbound_propagation_node");
+
+    let selected = daemon
+        .handle_rpc(RpcRequest {
+            id: 22,
+            method: "get_outbound_propagation_node".into(),
+            params: None,
+        })
+        .expect("get_outbound_propagation_node");
+    let selected_result = selected.result.expect("result");
+    assert_eq!(selected_result["peer"], "relay-a");
+    assert_eq!(selected_result["meta"]["contract_version"], "v2");
+
+    let listed = daemon
+        .handle_rpc(RpcRequest {
+            id: 23,
+            method: "list_propagation_nodes".into(),
+            params: None,
+        })
+        .expect("list_propagation_nodes");
+    let listed_result = listed.result.expect("result");
+    assert_eq!(listed_result["meta"]["contract_version"], "v2");
+    let nodes = listed_result
+        .get("nodes")
+        .and_then(|v| v.as_array())
+        .expect("nodes");
+    assert!(nodes
+        .iter()
+        .any(|entry| entry["peer"] == "relay-a" && entry["selected"] == true));
+}
+
+#[test]
+fn message_delivery_trace_records_transitions() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 24,
+            method: "send_message".into(),
+            params: Some(json!({
+                "id": "trace-1",
+                "source": "alice",
+                "destination": "bob",
+                "content": "hello"
+            })),
+        })
+        .expect("send_message");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 25,
+            method: "record_receipt".into(),
+            params: Some(json!({
+                "message_id": "trace-1",
+                "status": "delivered"
+            })),
+        })
+        .expect("record_receipt");
+
+    let trace = daemon
+        .handle_rpc(RpcRequest {
+            id: 26,
+            method: "message_delivery_trace".into(),
+            params: Some(json!({
+                "message_id": "trace-1"
+            })),
+        })
+        .expect("message_delivery_trace");
+    let trace_result = trace.result.expect("result");
+    assert_eq!(trace_result["meta"]["contract_version"], "v2");
+    let transitions = trace_result
+        .get("transitions")
+        .and_then(|v| v.as_array())
+        .expect("transitions");
+    assert!(transitions.iter().any(|entry| entry["status"] == "queued"));
+    assert!(transitions.iter().any(|entry| entry["status"] == "sending"));
+    assert!(transitions
+        .iter()
+        .any(|entry| entry["status"] == "delivered"));
+    assert!(transitions
+        .iter()
+        .any(|entry| entry["status"] == "delivered" && entry["reason_code"].is_null()));
+}
+
+#[test]
+fn receipt_event_exposes_reason_code() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 27,
+            method: "send_message".into(),
+            params: Some(json!({
+                "id": "trace-reason-1",
+                "source": "alice",
+                "destination": "bob",
+                "content": "hello"
+            })),
+        })
+        .expect("send_message");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 28,
+            method: "record_receipt".into(),
+            params: Some(json!({
+                "message_id": "trace-reason-1",
+                "status": "failed: receipt timeout"
+            })),
+        })
+        .expect("record_receipt");
+
+    let mut receipt_event = None;
+    while let Some(event) = daemon.take_event() {
+        if event.event_type == "receipt" {
+            receipt_event = Some(event);
+        }
+    }
+
+    let receipt_event = receipt_event.expect("receipt event");
+    assert_eq!(receipt_event.payload["reason_code"], "receipt_timeout");
+
+    let trace = daemon
+        .handle_rpc(RpcRequest {
+            id: 29,
+            method: "message_delivery_trace".into(),
+            params: Some(json!({
+                "message_id": "trace-reason-1"
+            })),
+        })
+        .expect("message_delivery_trace");
+    let trace_result = trace.result.expect("result");
+    let timeout_transition = trace_result["transitions"]
+        .as_array()
+        .expect("transitions")
+        .iter()
+        .find(|entry| entry["status"] == "failed: receipt timeout")
+        .cloned()
+        .expect("failed transition");
+    assert_eq!(timeout_transition["reason_code"], "receipt_timeout");
 }

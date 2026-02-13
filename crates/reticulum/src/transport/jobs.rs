@@ -159,7 +159,7 @@ pub(super) async fn manage_transport(
                                 drop(handler);
                                 handle_proof(packet, handler_arc.clone()).await;
                             }
-                            PacketType::Data => handle_data(&packet, handler).await,
+                            PacketType::Data => handle_data(&packet, message.address, handler).await,
                         }
                     }
                 };

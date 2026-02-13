@@ -14,6 +14,23 @@ pub struct MessageRecord {
     pub receipt_status: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AnnounceRecord {
+    pub id: String,
+    pub peer: String,
+    pub timestamp: i64,
+    pub name: Option<String>,
+    pub name_source: Option<String>,
+    pub first_seen: i64,
+    pub seen_count: u64,
+    pub app_data_hex: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub rssi: Option<f64>,
+    pub snr: Option<f64>,
+    pub q: Option<f64>,
+}
+
 pub struct MessagesStore {
     conn: Connection,
 }
@@ -124,6 +141,97 @@ impl MessagesStore {
         Ok(())
     }
 
+    pub fn insert_announce(&self, record: &AnnounceRecord) -> rusqlite::Result<()> {
+        let capabilities_json = serde_json::to_string(&record.capabilities).unwrap_or_default();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO announces (id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                &record.id,
+                &record.peer,
+                record.timestamp,
+                &record.name,
+                &record.name_source,
+                record.first_seen,
+                record.seen_count as i64,
+                &record.app_data_hex,
+                capabilities_json,
+                record.rssi,
+                record.snr,
+                record.q,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_announces(
+        &self,
+        limit: usize,
+        before_ts: Option<i64>,
+    ) -> rusqlite::Result<Vec<AnnounceRecord>> {
+        let mut records = Vec::new();
+        if let Some(ts) = before_ts {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces WHERE timestamp < ?1 ORDER BY timestamp DESC LIMIT ?2",
+            )?;
+            let mut rows = stmt.query(params![ts, limit as i64])?;
+            while let Some(row) = rows.next()? {
+                let capabilities_json: Option<String> = row.get(8)?;
+                let capabilities = capabilities_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                    .unwrap_or_default();
+                let seen_count: i64 = row.get(6)?;
+                records.push(AnnounceRecord {
+                    id: row.get(0)?,
+                    peer: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    name: row.get(3)?,
+                    name_source: row.get(4)?,
+                    first_seen: row.get(5)?,
+                    seen_count: seen_count.max(0) as u64,
+                    app_data_hex: row.get(7)?,
+                    capabilities,
+                    rssi: row.get(9)?,
+                    snr: row.get(10)?,
+                    q: row.get(11)?,
+                });
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q FROM announces ORDER BY timestamp DESC LIMIT ?1",
+            )?;
+            let mut rows = stmt.query(params![limit as i64])?;
+            while let Some(row) = rows.next()? {
+                let capabilities_json: Option<String> = row.get(8)?;
+                let capabilities = capabilities_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                    .unwrap_or_default();
+                let seen_count: i64 = row.get(6)?;
+                records.push(AnnounceRecord {
+                    id: row.get(0)?,
+                    peer: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    name: row.get(3)?,
+                    name_source: row.get(4)?,
+                    first_seen: row.get(5)?,
+                    seen_count: seen_count.max(0) as u64,
+                    app_data_hex: row.get(7)?,
+                    capabilities,
+                    rssi: row.get(9)?,
+                    snr: row.get(10)?,
+                    q: row.get(11)?,
+                });
+            }
+        }
+        Ok(records)
+    }
+
+    pub fn clear_announces(&self) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM announces", [])?;
+        Ok(())
+    }
+
     fn init_schema(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -136,6 +244,20 @@ impl MessagesStore {
                 direction TEXT NOT NULL,
                 fields TEXT,
                 receipt_status TEXT
+            );
+            CREATE TABLE IF NOT EXISTS announces (
+                id TEXT PRIMARY KEY,
+                peer TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                name TEXT,
+                name_source TEXT,
+                first_seen INTEGER NOT NULL,
+                seen_count INTEGER NOT NULL,
+                app_data_hex TEXT,
+                capabilities TEXT,
+                rssi REAL,
+                snr REAL,
+                q REAL
             );",
         )?;
         let _ = self
@@ -150,6 +272,33 @@ impl MessagesStore {
         let _ = self
             .conn
             .execute("ALTER TABLE messages ADD COLUMN receipt_status TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN name TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN name_source TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN first_seen INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN seen_count INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN app_data_hex TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN capabilities TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN rssi REAL", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN snr REAL", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN q REAL", []);
         Ok(())
     }
 }

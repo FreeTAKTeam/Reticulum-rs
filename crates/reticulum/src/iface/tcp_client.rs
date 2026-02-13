@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -19,6 +20,22 @@ use super::{Interface, InterfaceContext};
 
 // TODO: Configure via features
 const PACKET_TRACE: bool = false;
+
+fn tx_diag_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RETICULUMD_DIAGNOSTICS")
+            .or_else(|_| std::env::var("RETICULUM_TRANSPORT_DIAGNOSTICS"))
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "debug"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
 
 pub struct TcpClient {
     addr: String,
@@ -81,7 +98,10 @@ impl TcpClient {
 
             log::info!("tcp_client connected to <{}>", addr);
 
-            const BUFFER_SIZE: usize = core::mem::size_of::<Packet>() * 2;
+            // Use protocol MTU-scale buffers, not size_of::<Packet>(), since packet
+            // struct size does not reflect serialized wire size and can silently drop
+            // larger payloads during serialization.
+            const BUFFER_SIZE: usize = 2048;
 
             // Start receive task
             let rx_task = {
@@ -92,7 +112,7 @@ impl TcpClient {
 
                 tokio::spawn(async move {
                     let mut hdlc_rx_buffer = [0u8; BUFFER_SIZE];
-                    let mut rx_buffer = [0u8; BUFFER_SIZE + (BUFFER_SIZE / 2)];
+                    let mut frame_buffer: Vec<u8> = Vec::with_capacity(BUFFER_SIZE * 4);
                     let mut tcp_buffer = [0u8; (BUFFER_SIZE * 16)];
 
                     loop {
@@ -111,36 +131,51 @@ impl TcpClient {
                                             break;
                                         }
                                         Ok(n) => {
-                                            // TCP stream may contain several or partial HDLC frames
-                                            for &byte in tcp_buffer.iter().take(n) {
-                                                // Push new byte from the end of buffer
-                                                rx_buffer[BUFFER_SIZE - 1] = byte;
+                                            // TCP can deliver partial or multiple HDLC frames.
+                                            frame_buffer.extend_from_slice(&tcp_buffer[..n]);
 
-                                                // Check if it is contains a HDLC frame
-                                                let frame = Hdlc::find(&rx_buffer[..]);
-                                                if let Some(frame) = frame {
-                                                    // Decode HDLC frame and deserialize packet
-                                                    let frame_buffer = &mut rx_buffer[frame.0..frame.1+1];
-                                                    let mut output = OutputBuffer::new(&mut hdlc_rx_buffer[..]);
-                                                    if Hdlc::decode(frame_buffer, &mut output).is_ok() {
-                                                        if let Ok(packet) = Packet::deserialize(&mut InputBuffer::new(output.as_slice())) {
-                                                            if PACKET_TRACE {
-                                                                log::trace!("tcp_client: rx << ({}) {}", iface_address, packet);
-                                                            }
-                                                            let _ = rx_channel.send(RxMessage { address: iface_address, packet }).await;
-                                                        } else {
-                                                            log::warn!("tcp_client: couldn't decode packet");
+                                            while let Some((start, end)) = Hdlc::find(&frame_buffer) {
+                                                let frame = &frame_buffer[start..=end];
+                                                let mut output = OutputBuffer::new(&mut hdlc_rx_buffer[..]);
+                                                if Hdlc::decode(frame, &mut output).is_ok() {
+                                                    if let Ok(packet) =
+                                                        Packet::deserialize(&mut InputBuffer::new(output.as_slice()))
+                                                    {
+                                                        if PACKET_TRACE {
+                                                            log::trace!("tcp_client: rx << ({}) {}", iface_address, packet);
                                                         }
+                                                        if tx_diag_enabled() {
+                                                            eprintln!(
+                                                                "[tp-diag] tcp_client rx_packet iface={} type={:?} dst={} ctx={:02x} hops={}",
+                                                                iface_address,
+                                                                packet.header.packet_type,
+                                                                packet.destination,
+                                                                packet.context as u8,
+                                                                packet.header.hops
+                                                            );
+                                                        }
+                                                        let _ = rx_channel
+                                                            .send(RxMessage {
+                                                                address: iface_address,
+                                                                packet,
+                                                            })
+                                                            .await;
                                                     } else {
-                                                        log::warn!("tcp_client: couldn't decode hdlc frame");
+                                                        log::warn!("tcp_client: couldn't decode packet");
                                                     }
-
-                                                    // Remove current HDLC frame data
-                                                    frame_buffer.fill(0);
                                                 } else {
-                                                    // Move data left
-                                                    rx_buffer.copy_within(1.., 0);
+                                                    log::warn!("tcp_client: couldn't decode hdlc frame");
                                                 }
+
+                                                // Drop all bytes up to and including the closing
+                                                // flag of the frame we just handled.
+                                                frame_buffer.drain(..=end);
+                                            }
+
+                                            if frame_buffer.len() > BUFFER_SIZE * 64 {
+                                                // Guard against unbounded growth on malformed
+                                                // streams where no valid frame closes.
+                                                frame_buffer.clear();
                                             }
                                         }
                                         Err(e) => {
@@ -183,15 +218,69 @@ impl TcpClient {
                                 if PACKET_TRACE {
                                     log::trace!("tcp_client: tx >> ({}) {}", iface_address, packet);
                                 }
+                                if tx_diag_enabled() {
+                                    eprintln!("[tp-diag] tcp_client tx_dequeue iface={} {}", iface_address, packet);
+                                    log::info!("[tp-diag] tcp_client tx_dequeue iface={} {}", iface_address, packet);
+                                }
                                 let mut output = OutputBuffer::new(&mut tx_buffer);
                                 if packet.serialize(&mut output).is_ok() {
-
                                     let mut hdlc_output = OutputBuffer::new(&mut hdlc_tx_buffer[..]);
-
                                     if Hdlc::encode(output.as_slice(), &mut hdlc_output).is_ok() {
-                                        let _ = stream.write_all(hdlc_output.as_slice()).await;
-                                        let _ = stream.flush().await;
+                                        if let Err(err) = stream.write_all(hdlc_output.as_slice()).await {
+                                            log::warn!("tcp_client: write_all failed on {}: {}", iface_address, err);
+                                            eprintln!(
+                                                "[tp-diag] tcp_client write_all failed iface={} err={}",
+                                                iface_address, err
+                                            );
+                                            stop.cancel();
+                                            break;
+                                        }
+                                        if let Err(err) = stream.flush().await {
+                                            log::warn!("tcp_client: flush failed on {}: {}", iface_address, err);
+                                            eprintln!(
+                                                "[tp-diag] tcp_client flush failed iface={} err={}",
+                                                iface_address, err
+                                            );
+                                            stop.cancel();
+                                            break;
+                                        }
+                                        if tx_diag_enabled() {
+                                            eprintln!(
+                                                "[tp-diag] tcp_client tx_write_ok iface={} wire_len={} raw_len={}",
+                                                iface_address,
+                                                hdlc_output.as_slice().len(),
+                                                output.as_slice().len()
+                                            );
+                                            log::info!(
+                                                "[tp-diag] tcp_client tx_write_ok iface={} wire_len={} raw_len={}",
+                                                iface_address,
+                                                hdlc_output.as_slice().len(),
+                                                output.as_slice().len()
+                                            );
+                                        }
+                                    } else {
+                                        log::warn!(
+                                            "tcp_client: failed to HDLC-encode packet on {} (raw_len={})",
+                                            iface_address,
+                                            output.as_slice().len()
+                                        );
+                                        eprintln!(
+                                            "[tp-diag] tcp_client hdlc_encode failed iface={} raw_len={}",
+                                            iface_address,
+                                            output.as_slice().len()
+                                        );
                                     }
+                                } else {
+                                    log::warn!(
+                                        "tcp_client: failed to serialize packet on {} (buffer_cap={})",
+                                        iface_address,
+                                        tx_buffer.len()
+                                    );
+                                    eprintln!(
+                                        "[tp-diag] tcp_client serialize failed iface={} buffer_cap={}",
+                                        iface_address,
+                                        tx_buffer.len()
+                                    );
                                 }
                             }
                         };

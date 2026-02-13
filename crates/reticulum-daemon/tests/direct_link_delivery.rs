@@ -2,10 +2,24 @@ use rand_core::OsRng;
 use reticulum::destination::link::Link;
 use reticulum::destination::{DestinationDesc, DestinationName};
 use reticulum::identity::PrivateIdentity;
+use reticulum::iface::{Interface, InterfaceContext};
 use reticulum::packet::{DestinationType, PacketType};
 use reticulum::transport::{Transport, TransportConfig};
 use reticulum_daemon::direct_delivery::send_via_link;
 use tokio::time::Duration;
+
+struct SinkInterface;
+
+impl Interface for SinkInterface {
+    fn mtu() -> usize {
+        1500
+    }
+}
+
+async fn sink_worker(context: InterfaceContext<SinkInterface>) {
+    let (_rx_channel, mut tx_channel) = context.channel.split();
+    while tx_channel.recv().await.is_some() {}
+}
 
 #[tokio::test]
 async fn direct_send_uses_link_payloads() {
@@ -13,6 +27,11 @@ async fn direct_send_uses_link_payloads() {
     let receiver = PrivateIdentity::new_from_rand(OsRng);
 
     let transport = Transport::new(TransportConfig::new("test", &sender, true));
+    transport
+        .iface_manager()
+        .lock()
+        .await
+        .spawn(SinkInterface, sink_worker);
 
     let destination = DestinationDesc {
         identity: *receiver.as_identity(),
@@ -30,6 +49,7 @@ async fn direct_send_uses_link_payloads() {
     let proof = input_link.prove();
 
     link.lock().await.handle_packet(&proof);
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     let packet = send_via_link(
         &transport,

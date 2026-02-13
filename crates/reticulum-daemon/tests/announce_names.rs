@@ -8,7 +8,7 @@ use rmpv::Value;
 fn parse_peer_name_prefers_pn_metadata() {
     let mut router = Router::default();
     router.set_name("Alice PN");
-    let app_data = router.get_propagation_node_app_data();
+    let app_data = router.get_propagation_node_app_data().expect("pn app data");
 
     let parsed = parse_peer_name_from_app_data(&app_data).expect("name from pn metadata");
     assert_eq!(parsed.0, "Alice PN");

@@ -4,7 +4,7 @@ pub mod http;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
 
-use crate::storage::messages::{MessageRecord, MessagesStore};
+use crate::storage::messages::{AnnounceRecord, MessageRecord, MessagesStore};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -72,6 +72,14 @@ pub struct TicketRecord {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct DeliveryTraceEntry {
+    pub status: String,
+    pub timestamp: i64,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
 pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
@@ -83,9 +91,11 @@ pub struct RpcDaemon {
     delivery_policy: Mutex<DeliveryPolicy>,
     propagation_state: Mutex<PropagationState>,
     propagation_payloads: Mutex<HashMap<String, String>>,
+    outbound_propagation_node: Mutex<Option<String>>,
     paper_ingest_seen: Mutex<HashSet<String>>,
     stamp_policy: Mutex<StampPolicy>,
     ticket_cache: Mutex<HashMap<String, TicketRecord>>,
+    delivery_traces: Mutex<HashMap<String, Vec<DeliveryTraceEntry>>>,
     outbound_bridge: Option<Arc<dyn OutboundBridge>>,
     announce_bridge: Option<Arc<dyn AnnounceBridge>>,
 }
@@ -160,6 +170,16 @@ struct AnnounceReceivedParams {
     name: Option<String>,
     #[serde(default)]
     name_source: Option<String>,
+    #[serde(default)]
+    app_data_hex: Option<String>,
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    rssi: Option<f64>,
+    #[serde(default)]
+    snr: Option<f64>,
+    #[serde(default)]
+    q: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -228,6 +248,38 @@ struct TicketGenerateParams {
     ttl_secs: Option<u64>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ListAnnouncesParams {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before_ts: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetOutboundPropagationNodeParams {
+    #[serde(default)]
+    peer: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDeliveryTraceParams {
+    message_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+struct PropagationNodeRecord {
+    peer: String,
+    #[serde(default)]
+    name: Option<String>,
+    last_seen: i64,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    selected: bool,
+}
+
 fn merge_fields_with_options(
     fields: Option<JsonValue>,
     method: Option<String>,
@@ -286,6 +338,71 @@ fn clean_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_capabilities(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        out.push(normalized);
+    }
+    out
+}
+
+fn parse_capabilities_from_app_data_hex(app_data_hex: Option<&str>) -> Vec<String> {
+    let Some(raw_hex) = app_data_hex
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+    let Ok(app_data) = hex::decode(raw_hex) else {
+        return Vec::new();
+    };
+    if app_data.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(&app_data) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.as_array() else {
+        return Vec::new();
+    };
+    if entries.len() < 3 {
+        return Vec::new();
+    }
+
+    extract_capabilities_from_json(&entries[2]).unwrap_or_default()
+}
+
+fn extract_capabilities_from_json(value: &serde_json::Value) -> Option<Vec<String>> {
+    if let Some(array) = value.as_array() {
+        return Some(normalize_capabilities(
+            array
+                .iter()
+                .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
+                .collect(),
+        ));
+    }
+
+    let object = value.as_object()?;
+    for key in ["caps", "capabilities"] {
+        if let Some(array) = object.get(key).and_then(serde_json::Value::as_array) {
+            return Some(normalize_capabilities(
+                array
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
+                    .collect(),
+            ));
+        }
+    }
+
+    None
 }
 
 fn encode_hex(bytes: impl AsRef<[u8]>) -> String {

@@ -40,6 +40,7 @@ use crate::identity::{Identity, PrivateIdentity};
 use crate::iface::InterfaceManager;
 use crate::iface::InterfaceRxReceiver;
 use crate::iface::RxMessage;
+use crate::iface::TxDispatchTrace;
 use crate::iface::TxMessage;
 use crate::iface::TxMessageType;
 
@@ -225,6 +226,7 @@ pub struct SendPacketTrace {
     pub outcome: SendPacketOutcome,
     pub direct_iface: Option<AddressHash>,
     pub broadcast: bool,
+    pub dispatch: TxDispatchTrace,
 }
 
 // Transport internals are decomposed by concern for testability and bounded change sets.
