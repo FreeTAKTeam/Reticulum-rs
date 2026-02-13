@@ -33,7 +33,7 @@ hkdf = "0.12.4"
 
 # Hash
 hmac = "0.12.1"
-sha2 = "0.10.8"
+sha2 = "0.10.9"
 
 # Random Number generator
 rand_core = { version = "0.6.4", features = ["getrandom"] }
