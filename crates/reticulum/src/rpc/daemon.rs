@@ -353,15 +353,16 @@ impl RpcDaemon {
                 let limit = parsed.limit.unwrap_or(200).clamp(1, 5000);
                 let (before_ts, before_id) = match parsed.before_ts {
                     Some(timestamp) => (Some(timestamp), None),
-                    None => parse_announce_cursor(parsed.cursor.as_deref())
-                        .unwrap_or((None, None)),
+                    None => parse_announce_cursor(parsed.cursor.as_deref()).unwrap_or((None, None)),
                 };
                 let items = self
                     .store
                     .list_announces(limit, before_ts, before_id.as_deref())
                     .map_err(std::io::Error::other)?;
                 let next_cursor = if items.len() >= limit {
-                    items.last().map(|record| format!("{}:{}", record.timestamp, record.id))
+                    items
+                        .last()
+                        .map(|record| format!("{}:{}", record.timestamp, record.id))
                 } else {
                     None
                 };
