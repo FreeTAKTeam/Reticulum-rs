@@ -1,11 +1,12 @@
 pub mod codec;
+mod daemon;
 pub mod http;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
-use crate::storage::messages::{MessageRecord, MessagesStore};
-use std::collections::{HashMap, VecDeque};
+use crate::storage::messages::{AnnounceRecord, MessageRecord, MessagesStore};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::Duration;
@@ -30,22 +31,187 @@ pub struct RpcError {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct InterfaceRecord {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub enabled: bool,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct DeliveryPolicy {
+    pub auth_required: bool,
+    pub allowed_destinations: Vec<String>,
+    pub denied_destinations: Vec<String>,
+    pub ignored_destinations: Vec<String>,
+    pub prioritised_destinations: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PropagationState {
+    pub enabled: bool,
+    pub store_root: Option<String>,
+    pub target_cost: u32,
+    pub total_ingested: usize,
+    pub last_ingest_count: usize,
+    #[serde(default)]
+    pub sync_state: u32,
+    #[serde(default)]
+    pub sync_progress: f64,
+    #[serde(default)]
+    pub messages_received: usize,
+    #[serde(default)]
+    pub state_name: String,
+    #[serde(default)]
+    pub selected_node: Option<String>,
+    #[serde(default)]
+    pub max_messages: usize,
+    #[serde(default)]
+    pub last_sync_started: Option<i64>,
+    #[serde(default)]
+    pub last_sync_completed: Option<i64>,
+    #[serde(default)]
+    pub last_sync_error: Option<String>,
+}
+
+impl Default for PropagationState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            store_root: None,
+            target_cost: 0,
+            total_ingested: 0,
+            last_ingest_count: 0,
+            sync_state: 0,
+            sync_progress: 0.0,
+            messages_received: 0,
+            state_name: "idle".to_string(),
+            selected_node: None,
+            max_messages: 0,
+            last_sync_started: None,
+            last_sync_completed: None,
+            last_sync_error: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct StampPolicy {
+    pub target_cost: u32,
+    pub flexibility: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct IncomingMessageLimits {
+    pub delivery_per_transfer_limit_kb: u32,
+    pub propagation_per_transfer_limit_kb: u32,
+}
+
+impl Default for IncomingMessageLimits {
+    fn default() -> Self {
+        Self {
+            delivery_per_transfer_limit_kb: 1024,
+            propagation_per_transfer_limit_kb: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct RmspServerRecord {
+    pub destination_hash: String,
+    #[serde(default)]
+    pub identity_hash: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub coverage: Vec<String>,
+    #[serde(default)]
+    pub zoom_range: Vec<u32>,
+    #[serde(default)]
+    pub formats: Vec<String>,
+    #[serde(default)]
+    pub layers: Vec<String>,
+    #[serde(default)]
+    pub updated: Option<i64>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub hops: Option<u32>,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TicketRecord {
+    pub destination: String,
+    pub ticket: String,
+    pub expires_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct DeliveryTraceEntry {
+    pub status: String,
+    pub timestamp: i64,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
 pub struct RpcDaemon {
     store: MessagesStore,
     identity_hash: String,
+    delivery_destination_hash: Mutex<Option<String>>,
     events: broadcast::Sender<RpcEvent>,
     event_queue: Mutex<VecDeque<RpcEvent>>,
     peers: Mutex<HashMap<String, PeerRecord>>,
+    interfaces: Mutex<Vec<InterfaceRecord>>,
+    delivery_policy: Mutex<DeliveryPolicy>,
+    propagation_state: Mutex<PropagationState>,
+    propagation_payloads: Mutex<HashMap<String, String>>,
+    outbound_propagation_node: Mutex<Option<String>>,
+    incoming_message_limits: Mutex<IncomingMessageLimits>,
+    known_peer_identities: Mutex<HashMap<String, String>>,
+    known_announce_identities: Mutex<HashMap<String, String>>,
+    rmsp_servers: Mutex<HashMap<String, RmspServerRecord>>,
+    paper_ingest_seen: Mutex<HashSet<String>>,
+    stamp_policy: Mutex<StampPolicy>,
+    ticket_cache: Mutex<HashMap<String, TicketRecord>>,
+    delivery_traces: Mutex<HashMap<String, Vec<DeliveryTraceEntry>>>,
     outbound_bridge: Option<Arc<dyn OutboundBridge>>,
     announce_bridge: Option<Arc<dyn AnnounceBridge>>,
 }
 
 pub trait OutboundBridge: Send + Sync {
-    fn deliver(&self, record: &MessageRecord) -> Result<(), std::io::Error>;
+    fn deliver(
+        &self,
+        record: &MessageRecord,
+        options: &OutboundDeliveryOptions,
+    ) -> Result<(), std::io::Error>;
 }
 
 pub trait AnnounceBridge: Send + Sync {
     fn announce_now(&self) -> Result<(), std::io::Error>;
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct OutboundDeliveryOptions {
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub stamp_cost: Option<u32>,
+    #[serde(default)]
+    pub include_ticket: bool,
+    #[serde(default)]
+    pub try_propagation_on_fail: bool,
+    #[serde(default)]
+    pub ticket: Option<String>,
+    #[serde(default)]
+    pub source_private_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -58,6 +224,14 @@ pub struct RpcEvent {
 pub struct PeerRecord {
     pub peer: String,
     pub last_seen: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub name_source: Option<String>,
+    #[serde(default)]
+    pub first_seen: i64,
+    #[serde(default)]
+    pub seen_count: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +243,29 @@ struct SendMessageParams {
     title: String,
     content: String,
     fields: Option<JsonValue>,
+    #[serde(default)]
+    source_private_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageV2Params {
+    id: String,
+    source: String,
+    destination: String,
+    #[serde(default)]
+    title: String,
+    content: String,
+    fields: Option<JsonValue>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    stamp_cost: Option<u32>,
+    #[serde(default)]
+    include_ticket: Option<bool>,
+    #[serde(default)]
+    try_propagation_on_fail: Option<bool>,
+    #[serde(default)]
+    source_private_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,425 +278,392 @@ struct RecordReceiptParams {
 struct AnnounceReceivedParams {
     peer: String,
     timestamp: Option<i64>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    name_source: Option<String>,
+    #[serde(default)]
+    app_data_hex: Option<String>,
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
+    #[serde(default)]
+    rssi: Option<f64>,
+    #[serde(default)]
+    snr: Option<f64>,
+    #[serde(default)]
+    q: Option<f64>,
+    #[serde(default)]
+    aspect: Option<String>,
+    #[serde(default)]
+    hops: Option<u32>,
+    #[serde(default)]
+    interface: Option<String>,
+    #[serde(default)]
+    stamp_cost: Option<u32>,
+    #[serde(default)]
+    stamp_cost_flexibility: Option<u32>,
+    #[serde(default)]
+    peering_cost: Option<u32>,
 }
 
-impl RpcDaemon {
-    pub fn with_store(store: MessagesStore, identity_hash: String) -> Self {
-        let (events, _rx) = broadcast::channel(64);
-        Self {
-            store,
-            identity_hash,
-            events,
-            event_queue: Mutex::new(VecDeque::new()),
-            peers: Mutex::new(HashMap::new()),
-            outbound_bridge: None,
-            announce_bridge: None,
+#[derive(Debug, Deserialize)]
+struct SetInterfacesParams {
+    interfaces: Vec<InterfaceRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerOpParams {
+    peer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeliveryPolicyParams {
+    #[serde(default)]
+    auth_required: Option<bool>,
+    #[serde(default)]
+    allowed_destinations: Option<Vec<String>>,
+    #[serde(default)]
+    denied_destinations: Option<Vec<String>>,
+    #[serde(default)]
+    ignored_destinations: Option<Vec<String>>,
+    #[serde(default)]
+    prioritised_destinations: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PropagationEnableParams {
+    enabled: bool,
+    #[serde(default)]
+    store_root: Option<String>,
+    #[serde(default)]
+    target_cost: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PropagationIngestParams {
+    #[serde(default)]
+    transient_id: Option<String>,
+    #[serde(default)]
+    payload_hex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PropagationFetchParams {
+    transient_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestMessagesFromPropagationNodeParams {
+    #[serde(default)]
+    identity_private_key: Option<String>,
+    #[serde(default)]
+    max_messages: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HasPathParams {
+    destination: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestPathParams {
+    destination: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EstablishLinkParams {
+    destination: String,
+    #[serde(default)]
+    timeout_seconds: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IncomingMessageSizeLimitParams {
+    limit_kb: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendReactionParams {
+    destination: String,
+    target_message_id: String,
+    emoji: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    source_private_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendLocationTelemetryParams {
+    destination: String,
+    location_json: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    source_private_key: Option<String>,
+    #[serde(default)]
+    icon_name: Option<String>,
+    #[serde(default)]
+    icon_fg_color: Option<String>,
+    #[serde(default)]
+    icon_bg_color: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendTelemetryRequestParams {
+    destination: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    source_private_key: Option<String>,
+    #[serde(default)]
+    timebase: Option<f64>,
+    #[serde(default)]
+    is_collector_request: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StorePeerIdentityParams {
+    identity_hash: String,
+    public_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecallIdentityParams {
+    destination_hash_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestorePeerIdentityEntry {
+    identity_hash: String,
+    public_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestorePeerIdentitiesParams {
+    peers: Vec<RestorePeerIdentityEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BulkRestoreAnnounceIdentityEntry {
+    destination_hash: String,
+    public_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BulkRestoreAnnounceIdentitiesParams {
+    announces: Vec<BulkRestoreAnnounceIdentityEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RmspAnnounceParams {
+    destination_hash: String,
+    #[serde(default)]
+    identity_hash: Option<String>,
+    #[serde(default)]
+    public_key: Option<String>,
+    #[serde(default)]
+    app_data_hex: Option<String>,
+    #[serde(default)]
+    hops: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RmspServersForGeohashParams {
+    geohash: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PaperIngestUriParams {
+    uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StampPolicySetParams {
+    #[serde(default)]
+    target_cost: Option<u32>,
+    #[serde(default)]
+    flexibility: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TicketGenerateParams {
+    destination: String,
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ListAnnouncesParams {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before_ts: Option<i64>,
+    #[serde(default)]
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetOutboundPropagationNodeParams {
+    #[serde(default)]
+    peer: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RequestAlternativePropagationRelayParams {
+    #[serde(default)]
+    exclude_relays: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MessageDeliveryTraceParams {
+    message_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+struct PropagationNodeRecord {
+    peer: String,
+    #[serde(default)]
+    name: Option<String>,
+    last_seen: i64,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    aspect: Option<String>,
+    selected: bool,
+}
+
+fn now_i64() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn first_n_chars(input: &str, n: usize) -> Option<String> {
+    if n == 0 {
+        return Some(String::new());
+    }
+    let end = input
+        .char_indices()
+        .nth(n - 1)
+        .map(|(idx, ch)| idx + ch.len_utf8())?;
+    Some(input[..end].to_string())
+}
+
+fn clean_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_capabilities(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for value in values {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() || !seen.insert(normalized.clone()) {
+            continue;
+        }
+        out.push(normalized);
+    }
+    out
+}
+
+fn parse_capabilities_from_app_data_hex(app_data_hex: Option<&str>) -> Vec<String> {
+    let Some(raw_hex) = app_data_hex
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Vec::new();
+    };
+    let Ok(app_data) = hex::decode(raw_hex) else {
+        return Vec::new();
+    };
+    if app_data.is_empty() {
+        return Vec::new();
+    }
+
+    let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(&app_data) else {
+        return Vec::new();
+    };
+    let Some(entries) = value.as_array() else {
+        return Vec::new();
+    };
+
+    let mut capabilities = Vec::new();
+
+    // Current LXMF propagation-node announces encode node state as the third
+    // tuple element (index 2). Treat active state as propagation capability.
+    if entries
+        .get(2)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        capabilities.push("propagation".to_string());
+    }
+
+    for entry in entries {
+        if let Some(mut parsed) = extract_capabilities_from_json(entry) {
+            capabilities.append(&mut parsed);
         }
     }
 
-    pub fn with_store_and_bridge(
-        store: MessagesStore,
-        identity_hash: String,
-        outbound_bridge: Arc<dyn OutboundBridge>,
-    ) -> Self {
-        let (events, _rx) = broadcast::channel(64);
-        Self {
-            store,
-            identity_hash,
-            events,
-            event_queue: Mutex::new(VecDeque::new()),
-            peers: Mutex::new(HashMap::new()),
-            outbound_bridge: Some(outbound_bridge),
-            announce_bridge: None,
+    normalize_capabilities(capabilities)
+}
+
+fn extract_capabilities_from_json(value: &serde_json::Value) -> Option<Vec<String>> {
+    if let Some(array) = value.as_array() {
+        return Some(normalize_capabilities(
+            array
+                .iter()
+                .filter_map(|entry| entry.as_str().map(ToOwned::to_owned))
+                .collect(),
+        ));
+    }
+
+    let object = value.as_object()?;
+    let mut out = Vec::new();
+    if object
+        .get("node_state")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        out.push("propagation".to_string());
+    }
+    if object
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        out.push("propagation".to_string());
+    }
+    for key in ["caps", "capabilities"] {
+        if let Some(array) = object.get(key).and_then(serde_json::Value::as_array) {
+            out.extend(
+                array
+                    .iter()
+                    .filter_map(|entry| entry.as_str().map(ToOwned::to_owned)),
+            );
         }
     }
 
-    pub fn with_store_and_bridges(
-        store: MessagesStore,
-        identity_hash: String,
-        outbound_bridge: Option<Arc<dyn OutboundBridge>>,
-        announce_bridge: Option<Arc<dyn AnnounceBridge>>,
-    ) -> Self {
-        let (events, _rx) = broadcast::channel(64);
-        Self {
-            store,
-            identity_hash,
-            events,
-            event_queue: Mutex::new(VecDeque::new()),
-            peers: Mutex::new(HashMap::new()),
-            outbound_bridge,
-            announce_bridge,
-        }
+    if out.is_empty() {
+        None
+    } else {
+        Some(normalize_capabilities(out))
     }
+}
 
-    pub fn test_instance() -> Self {
-        let store = MessagesStore::in_memory().expect("in-memory store");
-        Self::with_store(store, "test-identity".into())
+fn encode_hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
     }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn test_instance_with_identity(identity: impl Into<String>) -> Self {
-        let store = MessagesStore::in_memory().expect("in-memory store");
-        Self::with_store(store, identity.into())
-    }
-
-    fn store_inbound_record(&self, record: MessageRecord) -> Result<(), std::io::Error> {
-        self.store
-            .insert_message(&record)
-            .map_err(std::io::Error::other)?;
-        let event = RpcEvent {
-            event_type: "inbound".into(),
-            payload: json!({ "message": record }),
-        };
-        self.push_event(event.clone());
-        let _ = self.events.send(event);
-        Ok(())
-    }
-
-    pub fn accept_inbound(&self, record: MessageRecord) -> Result<(), std::io::Error> {
-        self.store_inbound_record(record)
-    }
-
-    pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
-        let record = PeerRecord {
-            peer,
-            last_seen: timestamp,
-        };
-        {
-            let mut guard = self.peers.lock().expect("peers mutex poisoned");
-            guard.insert(record.peer.clone(), record.clone());
-        }
-        let event = RpcEvent {
-            event_type: "announce_received".into(),
-            payload: json!({ "peer": record.peer, "timestamp": record.last_seen }),
-        };
-        self.push_event(event.clone());
-        let _ = self.events.send(event);
-        Ok(())
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn accept_inbound_for_test(
-        &self,
-        record: MessageRecord,
-    ) -> Result<(), std::io::Error> {
-        self.store_inbound_record(record)
-    }
-
-    pub fn handle_rpc(&self, request: RpcRequest) -> Result<RpcResponse, std::io::Error> {
-        match request.method.as_str() {
-            "status" => Ok(RpcResponse {
-                id: request.id,
-                result: Some(json!({
-                    "identity_hash": self.identity_hash,
-                    "running": true
-                })),
-                error: None,
-            }),
-            "list_messages" => {
-                let items = self
-                    .store
-                    .list_messages(100, None)
-                    .map_err(std::io::Error::other)?;
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "messages": items })),
-                    error: None,
-                })
-            }
-            "list_peers" => {
-                let peers = self
-                    .peers
-                    .lock()
-                    .expect("peers mutex poisoned")
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>();
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "peers": peers })),
-                    error: None,
-                })
-            }
-            "send_message" => {
-                let params = request.params.ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
-                })?;
-                let parsed: SendMessageParams = serde_json::from_value(params)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as i64)
-                    .unwrap_or(0);
-                let record = MessageRecord {
-                    id: parsed.id.clone(),
-                    source: parsed.source,
-                    destination: parsed.destination,
-                    title: parsed.title,
-                    content: parsed.content,
-                    timestamp,
-                    direction: "out".into(),
-                    fields: parsed.fields,
-                    receipt_status: None,
-                };
-                self.store
-                    .insert_message(&record)
-                    .map_err(std::io::Error::other)?;
-                if let Some(bridge) = &self.outbound_bridge {
-                    let _ = bridge.deliver(&record);
-                } else {
-                    let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
-                }
-                let event = RpcEvent {
-                    event_type: "outbound".into(),
-                    payload: json!({ "message": record }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "message_id": record.id })),
-                    error: None,
-                })
-            }
-            "receive_message" => {
-                let params = request.params.ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
-                })?;
-                let parsed: SendMessageParams = serde_json::from_value(params)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as i64)
-                    .unwrap_or(0);
-                let record = MessageRecord {
-                    id: parsed.id.clone(),
-                    source: parsed.source,
-                    destination: parsed.destination,
-                    title: parsed.title,
-                    content: parsed.content,
-                    timestamp,
-                    direction: "in".into(),
-                    fields: parsed.fields,
-                    receipt_status: None,
-                };
-                self.store_inbound_record(record)?;
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "message_id": parsed.id })),
-                    error: None,
-                })
-            }
-            "record_receipt" => {
-                let params = request.params.ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
-                })?;
-                let parsed: RecordReceiptParams = serde_json::from_value(params)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                self.store
-                    .update_receipt_status(&parsed.message_id, &parsed.status)
-                    .map_err(std::io::Error::other)?;
-                let event = RpcEvent {
-                    event_type: "receipt".into(),
-                    payload: json!({ "message_id": parsed.message_id, "status": parsed.status }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(
-                        json!({ "message_id": parsed.message_id, "status": parsed.status }),
-                    ),
-                    error: None,
-                })
-            }
-            "announce_now" => {
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs() as i64)
-                    .unwrap_or(0);
-                if let Some(bridge) = &self.announce_bridge {
-                    let _ = bridge.announce_now();
-                }
-                let event = RpcEvent {
-                    event_type: "announce_sent".into(),
-                    payload: json!({ "timestamp": timestamp }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "announce_id": request.id })),
-                    error: None,
-                })
-            }
-            "announce_received" => {
-                let params = request.params.ok_or_else(|| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing params")
-                })?;
-                let parsed: AnnounceReceivedParams = serde_json::from_value(params)
-                    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-                let timestamp = parsed.timestamp.unwrap_or_else(|| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|value| value.as_secs() as i64)
-                        .unwrap_or(0)
-                });
-                let record = PeerRecord {
-                    peer: parsed.peer,
-                    last_seen: timestamp,
-                };
-                {
-                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
-                    guard.insert(record.peer.clone(), record.clone());
-                }
-                let event = RpcEvent {
-                    event_type: "announce_received".into(),
-                    payload: json!({ "peer": record.peer, "timestamp": record.last_seen }),
-                };
-                self.push_event(event.clone());
-                let _ = self.events.send(event);
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "peer": record })),
-                    error: None,
-                })
-            }
-            "clear_messages" => {
-                self.store.clear_messages().map_err(std::io::Error::other)?;
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "cleared": "messages" })),
-                    error: None,
-                })
-            }
-            "clear_resources" => Ok(RpcResponse {
-                id: request.id,
-                result: Some(json!({ "cleared": "resources" })),
-                error: None,
-            }),
-            "clear_peers" => {
-                {
-                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
-                    guard.clear();
-                }
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "cleared": "peers" })),
-                    error: None,
-                })
-            }
-            "clear_all" => {
-                self.store.clear_messages().map_err(std::io::Error::other)?;
-                {
-                    let mut guard = self.peers.lock().expect("peers mutex poisoned");
-                    guard.clear();
-                }
-                Ok(RpcResponse {
-                    id: request.id,
-                    result: Some(json!({ "cleared": "all" })),
-                    error: None,
-                })
-            }
-            _ => Ok(RpcResponse {
-                id: request.id,
-                result: None,
-                error: Some(RpcError {
-                    code: "NOT_IMPLEMENTED".into(),
-                    message: "method not implemented".into(),
-                }),
-            }),
-        }
-    }
-
-    pub fn handle_framed_request(&self, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        let request: RpcRequest = codec::decode_frame(bytes)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-        let response = self.handle_rpc(request)?;
-        codec::encode_frame(&response).map_err(std::io::Error::other)
-    }
-
-    pub fn subscribe_events(&self) -> broadcast::Receiver<RpcEvent> {
-        self.events.subscribe()
-    }
-
-    pub fn take_event(&self) -> Option<RpcEvent> {
-        let mut guard = self.event_queue.lock().expect("event_queue mutex poisoned");
-        guard.pop_front()
-    }
-
-    pub fn push_event(&self, event: RpcEvent) {
-        let mut guard = self.event_queue.lock().expect("event_queue mutex poisoned");
-        if guard.len() >= 32 {
-            guard.pop_front();
-        }
-        guard.push_back(event);
-    }
-
-    pub fn schedule_announce_for_test(&self, id: u64) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs() as i64)
-            .unwrap_or(0);
-        let event = RpcEvent {
-            event_type: "announce_sent".into(),
-            payload: json!({ "timestamp": timestamp, "announce_id": id }),
-        };
-        self.push_event(event.clone());
-        let _ = self.events.send(event);
-    }
-
-    pub fn start_announce_scheduler(
-        self: std::rc::Rc<Self>,
-        interval_secs: u64,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::task::spawn_local(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let id = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|value| value.as_secs())
-                    .unwrap_or(0);
-                self.schedule_announce_for_test(id);
-            }
-        })
-    }
-
-    pub fn inject_inbound_test_message(&self, content: &str) {
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|value| value.as_secs() as i64)
-            .unwrap_or(0);
-        let record = crate::storage::messages::MessageRecord {
-            id: format!("test-{}", timestamp),
-            source: "test-peer".into(),
-            destination: "local".into(),
-            title: "".into(),
-            content: content.into(),
-            timestamp,
-            direction: "in".into(),
-            fields: None,
-            receipt_status: None,
-        };
-        let _ = self.store.insert_message(&record);
-        let event = RpcEvent {
-            event_type: "inbound".into(),
-            payload: json!({ "message": record }),
-        };
-        self.push_event(event.clone());
-        let _ = self.events.send(event);
-    }
-
-    pub fn emit_link_event_for_test(&self) {
-        let event = RpcEvent {
-            event_type: "link_activated".into(),
-            payload: json!({ "link_id": "test-link" }),
-        };
-        self.push_event(event.clone());
-        let _ = self.events.send(event);
-    }
+    out
 }
 
 pub fn handle_framed_request(daemon: &RpcDaemon, bytes: &[u8]) -> Result<Vec<u8>, std::io::Error> {

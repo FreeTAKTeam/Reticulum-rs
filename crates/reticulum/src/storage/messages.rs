@@ -14,6 +14,35 @@ pub struct MessageRecord {
     pub receipt_status: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AnnounceRecord {
+    pub id: String,
+    pub peer: String,
+    pub timestamp: i64,
+    pub name: Option<String>,
+    pub name_source: Option<String>,
+    pub first_seen: i64,
+    pub seen_count: u64,
+    pub app_data_hex: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub rssi: Option<f64>,
+    pub snr: Option<f64>,
+    pub q: Option<f64>,
+    #[serde(default)]
+    pub aspect: Option<String>,
+    #[serde(default)]
+    pub hops: Option<u32>,
+    #[serde(default)]
+    pub interface: Option<String>,
+    #[serde(default)]
+    pub stamp_cost: Option<u32>,
+    #[serde(default)]
+    pub stamp_cost_flexibility: Option<u32>,
+    #[serde(default)]
+    pub peering_cost: Option<u32>,
+}
+
 pub struct MessagesStore {
     conn: Connection,
 }
@@ -41,15 +70,15 @@ impl MessagesStore {
         self.conn.execute(
             "INSERT OR REPLACE INTO messages (id, source, destination, title, content, timestamp, direction, fields, receipt_status) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                record.id,
-                record.source,
-                record.destination,
-                record.title,
-                record.content,
+                &record.id,
+                &record.source,
+                &record.destination,
+                &record.title,
+                &record.content,
                 record.timestamp,
-                record.direction,
+                &record.direction,
                 fields_json,
-                record.receipt_status,
+                &record.receipt_status,
             ],
         )?;
         Ok(())
@@ -124,6 +153,113 @@ impl MessagesStore {
         Ok(())
     }
 
+    pub fn insert_announce(&self, record: &AnnounceRecord) -> rusqlite::Result<()> {
+        let capabilities_json = serde_json::to_string(&record.capabilities).unwrap_or_default();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO announces (id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q, aspect, hops, interface, stamp_cost, stamp_cost_flexibility, peering_cost) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+            params![
+                &record.id,
+                &record.peer,
+                record.timestamp,
+                &record.name,
+                &record.name_source,
+                record.first_seen,
+                record.seen_count as i64,
+                &record.app_data_hex,
+                capabilities_json,
+                record.rssi,
+                record.snr,
+                record.q,
+                &record.aspect,
+                record.hops.map(i64::from),
+                &record.interface,
+                record.stamp_cost.map(i64::from),
+                record.stamp_cost_flexibility.map(i64::from),
+                record.peering_cost.map(i64::from),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_announces(
+        &self,
+        limit: usize,
+        before_ts: Option<i64>,
+        before_id: Option<&str>,
+    ) -> rusqlite::Result<Vec<AnnounceRecord>> {
+        let mut records = Vec::new();
+        let parse_row = |row: &rusqlite::Row| -> rusqlite::Result<AnnounceRecord> {
+            let parse_opt_u32 = |value: Option<i64>| -> Option<u32> {
+                value
+                    .and_then(|raw| (raw >= 0).then_some(raw as u64))
+                    .and_then(|raw| {
+                        if raw <= u32::MAX as u64 {
+                            Some(raw as u32)
+                        } else {
+                            None
+                        }
+                    })
+            };
+            let capabilities_json: Option<String> = row.get(8)?;
+            let capabilities = capabilities_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Vec<String>>(value).ok())
+                .unwrap_or_default();
+            let seen_count: i64 = row.get(6)?;
+            Ok(AnnounceRecord {
+                id: row.get(0)?,
+                peer: row.get(1)?,
+                timestamp: row.get(2)?,
+                name: row.get(3)?,
+                name_source: row.get(4)?,
+                first_seen: row.get(5)?,
+                seen_count: seen_count.max(0) as u64,
+                app_data_hex: row.get(7)?,
+                capabilities,
+                rssi: row.get(9)?,
+                snr: row.get(10)?,
+                q: row.get(11)?,
+                aspect: row.get(12)?,
+                hops: parse_opt_u32(row.get(13)?),
+                interface: row.get(14)?,
+                stamp_cost: parse_opt_u32(row.get(15)?),
+                stamp_cost_flexibility: parse_opt_u32(row.get(16)?),
+                peering_cost: parse_opt_u32(row.get(17)?),
+            })
+        };
+        if let Some(ts) = before_ts {
+            let query_with_id = "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q, aspect, hops, interface, stamp_cost, stamp_cost_flexibility, peering_cost FROM announces WHERE (timestamp < ?1 OR (timestamp = ?1 AND id < ?2)) ORDER BY timestamp DESC, id DESC LIMIT ?3";
+            let query_without_id = "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q, aspect, hops, interface, stamp_cost, stamp_cost_flexibility, peering_cost FROM announces WHERE timestamp < ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2";
+            if let Some(ann_id) = before_id {
+                let mut stmt = self.conn.prepare(query_with_id)?;
+                let mut rows = stmt.query(params![ts, ann_id, limit as i64])?;
+                while let Some(row) = rows.next()? {
+                    records.push(parse_row(row)?);
+                }
+            } else {
+                let mut stmt = self.conn.prepare(query_without_id)?;
+                let mut rows = stmt.query(params![ts, limit as i64])?;
+                while let Some(row) = rows.next()? {
+                    records.push(parse_row(row)?);
+                }
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, peer, timestamp, name, name_source, first_seen, seen_count, app_data_hex, capabilities, rssi, snr, q, aspect, hops, interface, stamp_cost, stamp_cost_flexibility, peering_cost FROM announces ORDER BY timestamp DESC LIMIT ?1",
+            )?;
+            let mut rows = stmt.query(params![limit as i64])?;
+            while let Some(row) = rows.next()? {
+                records.push(parse_row(row)?);
+            }
+        }
+        Ok(records)
+    }
+
+    pub fn clear_announces(&self) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM announces", [])?;
+        Ok(())
+    }
+
     fn init_schema(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -136,6 +272,26 @@ impl MessagesStore {
                 direction TEXT NOT NULL,
                 fields TEXT,
                 receipt_status TEXT
+            );
+            CREATE TABLE IF NOT EXISTS announces (
+                id TEXT PRIMARY KEY,
+                peer TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                name TEXT,
+                name_source TEXT,
+                first_seen INTEGER NOT NULL,
+                seen_count INTEGER NOT NULL,
+                app_data_hex TEXT,
+                capabilities TEXT,
+                rssi REAL,
+                snr REAL,
+                q REAL,
+                aspect TEXT,
+                hops INTEGER,
+                interface TEXT,
+                stamp_cost INTEGER,
+                stamp_cost_flexibility INTEGER,
+                peering_cost INTEGER
             );",
         )?;
         let _ = self
@@ -150,6 +306,52 @@ impl MessagesStore {
         let _ = self
             .conn
             .execute("ALTER TABLE messages ADD COLUMN receipt_status TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN name TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN name_source TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN first_seen INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN seen_count INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN app_data_hex TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN capabilities TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN rssi REAL", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN snr REAL", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN q REAL", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN aspect TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN hops INTEGER", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN interface TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN stamp_cost INTEGER", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE announces ADD COLUMN stamp_cost_flexibility INTEGER",
+            [],
+        );
+        let _ = self
+            .conn
+            .execute("ALTER TABLE announces ADD COLUMN peering_cost INTEGER", []);
         Ok(())
     }
 }

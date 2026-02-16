@@ -1,83 +1,59 @@
-
 # Reticulum-rs
 
-**Reticulum-rs** is a Rust implementation of the [Reticulum Network Stack](https://reticulum.network/) — a cryptographic, decentralised, and resilient mesh networking protocol designed for communication over any physical layer.
+Rust implementation of the Reticulum network stack with reliability-first architecture.
 
-This project brings Reticulum's capabilities to the Rust ecosystem, enabling embedded, and constrained deployments with maximum performance and minimal dependencies.
+## Project Goals
+- Protocol correctness and deterministic behavior.
+- Clear separation of transport core and daemon runtime.
+- Portable core with proprietary drivers kept out-of-tree.
 
-## Features
+## Workspace Layout
 
-- 📡 Cryptographic mesh networking
-- 🔐 Trustless routing via identity-based keys
-- 📁 Lightweight and modular design
-- 🧱 Support for multiple transport layers (TCP, serial, Kaonic)
-- 🔌 Easily embeddable in embedded devices and tactical radios
-- 🧪 Example clients for testnets and real deployments
-
-## Structure
-
-
-```
+```text
 Reticulum-rs/
-├── src/                 # Core Reticulum protocol implementation
-│   ├── buffer.rs
-│   ├── crypt.rs
-│   ├── destination.rs
-│   ├── error.rs
-│   ├── hash.rs
-│   ├── identity.rs
-│   ├── iface.rs
-│   ├── lib.rs
-│   ├── transport.rs
-│   └── packet.rs
-├── proto/               # Protocol definitions (e.g. for Kaonic)
-│   └── kaonic/
-│       └── kaonic.proto
-├── examples/            # Example clients and servers
-│   ├── kaonic_client.rs
-│   ├── link_client.rs
-│   ├── tcp_client.rs
-│   ├── tcp_server.rs
-│   └── testnet_client.rs
-├── Cargo.toml           # Crate configuration
-├── LICENSE              # License (MIT/Apache)
-└── build.rs             
-````
-## Getting Started
-
-### Prerequisites
-
-* Rust (edition 2021+)
-* `protoc` for compiling `.proto` files (if using gRPC/Kaonic modules)
-
-### Build
-
-```bash
-cargo build --release
+├── crates/
+│   ├── reticulum/           # Protocol and transport core
+│   └── reticulum-daemon/    # Runtime shell and bridge logic
+├── docs/
+│   ├── architecture/
+│   ├── adr/
+│   └── compatibility-contract.md
+└── .github/workflows/ci.yml
 ```
 
-### Run Examples
+## Transport Module Topology
+- `transport::core`
+- `transport::path`
+- `transport::announce`
+- `transport::jobs`
+- `transport::wire`
+
+## Build
 
 ```bash
-# TCP client example
-cargo run --example tcp_client
-
-# Kaonic mesh test client
-cargo run --example kaonic_client
+cargo check --workspace --all-targets --all-features
+cargo test --workspace --all-features
 ```
 
-## Use Cases
+For a full target sweep (examples + benches + doc tests), use:
 
-* 🛰 Tactical radio mesh with Kaonic
-* 🕵️‍♂️ Covert communication using serial or sub-GHz transceivers
-* 🚁 UAV-to-ground resilient C2 and telemetry
-* 🧱 Decentralized infrastructure-free messaging
+```bash
+cargo test --workspace --all-targets --all-features
+```
+
+## Extension Boundary
+External hardware integrations should implement traits in:
+- `crates/reticulum/src/iface/driver.rs`
+
+This keeps proprietary drivers outside the repository while preserving integration points.
+
+## Compatibility
+- Cross-repo contract: `docs/compatibility-contract.md`
+
+## Governance
+- Contribution guide: `CONTRIBUTING.md`
+- Security policy: `SECURITY.md`
+- Code owners: `.github/CODEOWNERS`
 
 ## License
-
-This project is licensed under the MIT license.
-
----
-
-© Beechat Network Systems Ltd. All rights reserved.
-https://beechat.network/
+MIT
