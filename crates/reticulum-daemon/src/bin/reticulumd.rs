@@ -100,6 +100,7 @@ impl OutboundBridge for TransportBridge {
     fn deliver(
         &self,
         record: &reticulum::storage::messages::MessageRecord,
+        _options: &reticulum::rpc::OutboundDeliveryOptions,
     ) -> Result<(), std::io::Error> {
         let destination = parse_destination_hex_required(&record.destination)?;
         let peer_info = self

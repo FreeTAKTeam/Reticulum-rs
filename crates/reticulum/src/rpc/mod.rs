@@ -101,11 +101,31 @@ pub struct RpcDaemon {
 }
 
 pub trait OutboundBridge: Send + Sync {
-    fn deliver(&self, record: &MessageRecord) -> Result<(), std::io::Error>;
+    fn deliver(
+        &self,
+        record: &MessageRecord,
+        options: &OutboundDeliveryOptions,
+    ) -> Result<(), std::io::Error>;
 }
 
 pub trait AnnounceBridge: Send + Sync {
     fn announce_now(&self) -> Result<(), std::io::Error>;
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct OutboundDeliveryOptions {
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub stamp_cost: Option<u32>,
+    #[serde(default)]
+    pub include_ticket: bool,
+    #[serde(default)]
+    pub try_propagation_on_fail: bool,
+    #[serde(default)]
+    pub ticket: Option<String>,
+    #[serde(default)]
+    pub source_private_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -137,6 +157,29 @@ struct SendMessageParams {
     title: String,
     content: String,
     fields: Option<JsonValue>,
+    #[serde(default)]
+    source_private_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageV2Params {
+    id: String,
+    source: String,
+    destination: String,
+    #[serde(default)]
+    title: String,
+    content: String,
+    fields: Option<JsonValue>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    stamp_cost: Option<u32>,
+    #[serde(default)]
+    include_ticket: Option<bool>,
+    #[serde(default)]
+    try_propagation_on_fail: Option<bool>,
+    #[serde(default)]
+    source_private_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

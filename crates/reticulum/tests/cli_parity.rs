@@ -17,6 +17,11 @@ fn rnstatus_help_matches_expected_flags() {
 }
 
 #[test]
+fn rnstatus_help_matches_expected_flags() {
+    cli_help_contains_config("rnstatus");
+}
+
+#[test]
 fn rnprobe_help_matches_expected_flags() {
     let output = std::process::Command::new("cargo")
         .args([
