@@ -50,13 +50,22 @@ pub struct DeliveryPolicy {
     pub prioritised_destinations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct PropagationState {
     pub enabled: bool,
     pub store_root: Option<String>,
     pub target_cost: u32,
     pub total_ingested: usize,
     pub last_ingest_count: usize,
+    pub sync_state: u32,
+    pub state_name: String,
+    pub sync_progress: f64,
+    pub messages_received: usize,
+    pub max_messages: usize,
+    pub selected_node: Option<String>,
+    pub last_sync_started: Option<i64>,
+    pub last_sync_completed: Option<i64>,
+    pub last_sync_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
@@ -180,23 +189,6 @@ struct SendMessageV2Params {
     try_propagation_on_fail: Option<bool>,
     #[serde(default)]
     source_private_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SendMessageV2Params {
-    id: String,
-    source: String,
-    destination: String,
-    #[serde(default)]
-    title: String,
-    content: String,
-    fields: Option<JsonValue>,
-    #[serde(default)]
-    method: Option<String>,
-    #[serde(default)]
-    stamp_cost: Option<u32>,
-    #[serde(default)]
-    include_ticket: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

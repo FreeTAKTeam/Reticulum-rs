@@ -4,7 +4,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::UnboundedSender;
-use serde_json::json;
 
 #[derive(Debug, Clone)]
 pub struct ReceiptEvent {

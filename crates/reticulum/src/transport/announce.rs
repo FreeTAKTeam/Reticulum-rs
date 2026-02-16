@@ -77,10 +77,22 @@ pub(super) async fn handle_announce<'a>(
         }
     }
 
+    let name_hash = {
+        let destination = destination.lock().await;
+        let source = destination.desc.name.as_name_hash_slice();
+        let mut name_hash = [0u8; crate::destination::NAME_HASH_LENGTH];
+        name_hash.copy_from_slice(source);
+        name_hash
+    };
+    let interface = iface.as_slice().to_vec();
+
     let _ = handler.announce_tx.send(AnnounceEvent {
         destination,
         app_data: PacketDataBuffer::new_from_slice(announce.app_data),
         ratchet,
+        name_hash,
+        hops: packet.header.hops,
+        interface,
     });
 }
 

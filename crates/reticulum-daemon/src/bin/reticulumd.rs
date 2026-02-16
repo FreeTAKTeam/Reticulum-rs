@@ -629,15 +629,6 @@ async fn main() {
                 });
             }
 
-            if transport.is_some() {
-                let daemon_receipts = daemon.clone();
-                tokio::task::spawn_local(async move {
-                    while let Some(event) = receipt_rx.recv().await {
-                        let _ = handle_receipt_event(&daemon_receipts, event);
-                    }
-                });
-            }
-
             if args.announce_interval_secs > 0 {
                 let _handle = daemon
                     .clone()
@@ -730,60 +721,6 @@ async fn main() {
                                 peer_name,
                                 peer_name_source,
                             );
-                        }
-                    }
-                });
-            }
-
-            if let Some(transport) = transport.clone() {
-                let daemon_inbound = daemon.clone();
-                let inbound_transport = transport.clone();
-                let inbound_identity = identity.clone();
-                tokio::task::spawn_local(async move {
-                    let mut rx = inbound_transport.received_data_events();
-                    loop {
-                        if let Ok(event) = rx.recv().await {
-                            let data = event.data.as_slice();
-                            eprintln!(
-                                "[daemon] rx data len={} dst={}",
-                                data.len(),
-                                hex::encode(event.destination.as_slice())
-                            );
-                            let mut destination = [0u8; 16];
-                            destination.copy_from_slice(event.destination.as_slice());
-                            if let Some(record) = decode_inbound_payload(destination, data) {
-                                let _ = daemon_inbound.accept_inbound(record);
-                            }
-                        }
-                    }
-                });
-
-                let daemon_announce = daemon.clone();
-                let peer_crypto = peer_crypto.clone();
-                let announce_transport = transport.clone();
-                tokio::task::spawn_local(async move {
-                    let mut rx = announce_transport.recv_announces().await;
-                    loop {
-                        if let Ok(event) = rx.recv().await {
-                            let dest = event.destination.lock().await;
-                            let peer = hex::encode(dest.desc.address_hash.as_slice());
-                            let identity = dest.desc.identity;
-                            let _ratchet = event.ratchet;
-                            peer_crypto
-                                .lock()
-                                .expect("peer map")
-                                .insert(
-                                    peer.clone(),
-                                    PeerCrypto {
-                                        identity,
-                                    },
-                                );
-                            eprintln!("[daemon] rx announce peer={}", peer);
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|value| value.as_secs() as i64)
-                                .unwrap_or(0);
-                            let _ = daemon_announce.accept_announce(peer, timestamp);
                         }
                     }
                 });

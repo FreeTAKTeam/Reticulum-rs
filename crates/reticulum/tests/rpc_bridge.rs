@@ -25,6 +25,7 @@ impl OutboundBridge for FailingBridge {
     fn deliver(
         &self,
         _record: &reticulum::storage::messages::MessageRecord,
+        _options: &OutboundDeliveryOptions,
     ) -> Result<(), std::io::Error> {
         Err(std::io::Error::other("simulated failure"))
     }

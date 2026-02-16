@@ -125,6 +125,17 @@ impl RpcDaemon {
         guard.target_cost = target_cost;
     }
 
+    pub fn update_propagation_sync_state<F>(&self, update: F)
+    where
+        F: FnOnce(&mut PropagationState),
+    {
+        let mut guard = self
+            .propagation_state
+            .lock()
+            .expect("propagation mutex poisoned");
+        update(&mut guard);
+    }
+
     fn store_inbound_record(&self, record: MessageRecord) -> Result<(), std::io::Error> {
         self.store
             .insert_message(&record)
@@ -144,7 +155,8 @@ impl RpcDaemon {
 
     pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
         self.accept_announce_with_metadata(
-            peer, timestamp, None, None, None, None, None, None, None,
+            peer, timestamp, None, None, None, None, None, None, None, None, None, None, None,
+            None, None,
         )
     }
 
@@ -165,6 +177,12 @@ impl RpcDaemon {
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
     }
 
@@ -180,6 +198,12 @@ impl RpcDaemon {
         rssi: Option<f64>,
         snr: Option<f64>,
         q: Option<f64>,
+        aspect: Option<String>,
+        hops: Option<u32>,
+        interface: Option<String>,
+        source_private_key: Option<String>,
+        source_identity: Option<String>,
+        source_node: Option<String>,
     ) -> Result<(), std::io::Error> {
         let record = self.upsert_peer(peer, timestamp, name, name_source);
         let capability_list = if let Some(caps) = capabilities {
@@ -224,6 +248,12 @@ impl RpcDaemon {
                 "rssi": rssi,
                 "snr": snr,
                 "q": q,
+                "aspect": aspect,
+                "hops": hops,
+                "interface": interface,
+                "source_private_key": source_private_key,
+                "source_identity": source_identity,
+                "source_node": source_node,
             }),
         };
         self.push_event(event.clone());
@@ -532,6 +562,10 @@ impl RpcDaemon {
                 })?;
                 let parsed: SendMessageParams = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let options = OutboundDeliveryOptions {
+                    source_private_key: parsed.source_private_key,
+                    ..Default::default()
+                };
 
                 self.store_outbound(
                     request.id,
@@ -543,6 +577,7 @@ impl RpcDaemon {
                     parsed.fields,
                     None,
                     None,
+                    options,
                     None,
                 )
             }
@@ -552,6 +587,7 @@ impl RpcDaemon {
                 })?;
                 let parsed: SendMessageV2Params = serde_json::from_value(params)
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+                let outbound_method = parsed.method.clone();
 
                 self.store_outbound(
                     request.id,
@@ -561,8 +597,16 @@ impl RpcDaemon {
                     parsed.title,
                     parsed.content,
                     parsed.fields,
-                    parsed.method,
+                    outbound_method.clone(),
                     parsed.stamp_cost,
+                    OutboundDeliveryOptions {
+                        method: outbound_method,
+                        stamp_cost: parsed.stamp_cost,
+                        include_ticket: parsed.include_ticket.unwrap_or_default(),
+                        try_propagation_on_fail: parsed.try_propagation_on_fail.unwrap_or_default(),
+                        ticket: None,
+                        source_private_key: parsed.source_private_key,
+                    },
                     parsed.include_ticket,
                 )
             }
@@ -1058,6 +1102,12 @@ impl RpcDaemon {
                     parsed.rssi,
                     parsed.snr,
                     parsed.q,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )?;
                 let record = self
                     .peers
@@ -1200,6 +1250,7 @@ impl RpcDaemon {
         fields: Option<JsonValue>,
         method: Option<String>,
         stamp_cost: Option<u32>,
+        options: OutboundDeliveryOptions,
         include_ticket: Option<bool>,
     ) -> Result<RpcResponse, std::io::Error> {
         let timestamp = now_i64();
@@ -1221,7 +1272,7 @@ impl RpcDaemon {
             .map_err(std::io::Error::other)?;
         self.append_delivery_trace(&id, "sending".to_string());
         let deliver_result = if let Some(bridge) = &self.outbound_bridge {
-            bridge.deliver(&record)
+            bridge.deliver(&record, &options)
         } else {
             let _delivered = crate::transport::test_bridge::deliver_outbound(&record);
             Ok(())
@@ -1335,6 +1386,11 @@ impl RpcDaemon {
             guard.pop_front();
         }
         guard.push_back(event);
+    }
+
+    pub fn emit_event(&self, event: RpcEvent) {
+        self.push_event(event.clone());
+        let _ = self.events.send(event);
     }
 
     pub fn schedule_announce_for_test(&self, id: u64) {
