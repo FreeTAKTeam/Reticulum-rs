@@ -156,7 +156,7 @@ impl RpcDaemon {
     pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
         self.accept_announce_with_metadata(
             peer, timestamp, None, None, None, None, None, None, None, None, None, None, None,
-            None, None,
+            None, None, None, None,
         )
     }
 
@@ -183,6 +183,8 @@ impl RpcDaemon {
             None,
             None,
             None,
+            None,
+            None,
         )
     }
 
@@ -198,6 +200,8 @@ impl RpcDaemon {
         rssi: Option<f64>,
         snr: Option<f64>,
         q: Option<f64>,
+        stamp_cost_flexibility: Option<u32>,
+        peering_cost: Option<u32>,
         aspect: Option<String>,
         hops: Option<u32>,
         interface: Option<String>,
@@ -228,6 +232,8 @@ impl RpcDaemon {
             rssi,
             snr,
             q,
+            stamp_cost_flexibility,
+            peering_cost,
         };
         self.store
             .insert_announce(&announce_record)
@@ -248,6 +254,8 @@ impl RpcDaemon {
                 "rssi": rssi,
                 "snr": snr,
                 "q": q,
+                "stamp_cost_flexibility": stamp_cost_flexibility,
+                "peering_cost": peering_cost,
                 "aspect": aspect,
                 "hops": hops,
                 "interface": interface,
@@ -1096,6 +1104,12 @@ impl RpcDaemon {
                     .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
                 let timestamp = parsed.timestamp.unwrap_or_else(now_i64);
                 let peer = parsed.peer.clone();
+                let (parsed_stamp_cost_flexibility, parsed_peering_cost) =
+                    parse_announce_costs_from_app_data_hex(parsed.app_data_hex.as_deref());
+                let stamp_cost_flexibility = parsed
+                    .stamp_cost_flexibility
+                    .or(parsed_stamp_cost_flexibility);
+                let peering_cost = parsed.peering_cost.or(parsed_peering_cost);
                 self.accept_announce_with_metadata(
                     parsed.peer,
                     timestamp,
@@ -1106,6 +1120,8 @@ impl RpcDaemon {
                     parsed.rssi,
                     parsed.snr,
                     parsed.q,
+                    stamp_cost_flexibility,
+                    peering_cost,
                     None,
                     None,
                     None,
