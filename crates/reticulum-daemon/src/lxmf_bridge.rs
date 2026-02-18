@@ -115,9 +115,7 @@ fn normalize_attachment_data(value: &JsonValue) -> Option<JsonValue> {
                         }
                     })
                     .or_else(|| item.as_i64().and_then(|value| u8::try_from(value).ok()));
-                let Some(byte) = byte else {
-                    return None;
-                };
+                let byte = byte?;
                 normalized.push(byte);
             }
             normalized
