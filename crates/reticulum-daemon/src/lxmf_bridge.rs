@@ -1,7 +1,7 @@
-use lxmf::error::LxmfError;
-use lxmf::message::Message;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use lxmf::error::LxmfError;
+use lxmf::message::Message;
 use reticulum::identity::PrivateIdentity;
 use rmpv::Value;
 use serde_json::Value as JsonValue;
@@ -44,8 +44,16 @@ fn normalize_attachment_fields_for_wire(fields: &mut JsonValue) {
         .get("5")
         .and_then(JsonValue::as_array)
         .and_then(normalize_file_attachments)
-        .or_else(|| map.get("attachments").and_then(JsonValue::as_array).and_then(normalize_file_attachments))
-        .or_else(|| map.get("files").and_then(JsonValue::as_array).and_then(normalize_file_attachments));
+        .or_else(|| {
+            map.get("attachments")
+                .and_then(JsonValue::as_array)
+                .and_then(normalize_file_attachments)
+        })
+        .or_else(|| {
+            map.get("files")
+                .and_then(JsonValue::as_array)
+                .and_then(normalize_file_attachments)
+        });
     if let Some(value) = normalized_field_5 {
         map.insert("5".to_string(), value);
         map.remove("attachments");
@@ -75,7 +83,10 @@ fn normalize_file_attachment_entry(entry: &JsonValue) -> Option<JsonValue> {
         JsonValue::Array(items) if items.len() >= 2 => {
             let filename = items[0].as_str()?;
             let data = normalize_attachment_data(&items[1])?;
-            Some(JsonValue::Array(vec![JsonValue::String(filename.to_string()), data]))
+            Some(JsonValue::Array(vec![
+                JsonValue::String(filename.to_string()),
+                data,
+            ]))
         }
         JsonValue::Object(map) => {
             let filename = map.get("filename").or_else(|| map.get("name"))?.as_str()?;
@@ -94,13 +105,16 @@ fn normalize_attachment_data(value: &JsonValue) -> Option<JsonValue> {
         JsonValue::Array(items) => {
             let mut normalized = Vec::with_capacity(items.len());
             for item in items {
-                let byte = item.as_u64().and_then(|value| {
-                    if value <= u8::MAX as u64 {
-                        Some(value as u8)
-                    } else {
-                        None
-                    }
-                }).or_else(|| item.as_i64().and_then(|value| u8::try_from(value).ok()));
+                let byte = item
+                    .as_u64()
+                    .and_then(|value| {
+                        if value <= u8::MAX as u64 {
+                            Some(value as u8)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| item.as_i64().and_then(|value| u8::try_from(value).ok()));
                 let Some(byte) = byte else {
                     return None;
                 };

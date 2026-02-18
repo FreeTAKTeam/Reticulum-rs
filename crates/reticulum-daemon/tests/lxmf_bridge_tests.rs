@@ -63,11 +63,21 @@ fn build_wire_message_normalizes_attachment_object_metadata() {
         ],
     });
 
-    let wire = build_wire_message(source, destination, "title", "content", Some(fields), &identity)
-        .expect("wire");
+    let wire = build_wire_message(
+        source,
+        destination,
+        "title",
+        "content",
+        Some(fields),
+        &identity,
+    )
+    .expect("wire");
     let message = decode_wire_message(&wire).expect("decode");
 
-    let fields = message.fields.and_then(|value| rmpv_to_json(&value)).expect("fields");
+    let fields = message
+        .fields
+        .and_then(|value| rmpv_to_json(&value))
+        .expect("fields");
     assert_eq!(
         fields["5"],
         serde_json::json!([["override.bin", [1, 2, 3]]])
@@ -99,11 +109,21 @@ fn build_wire_message_normalizes_hex_and_base64_attachment_data() {
         ],
     });
 
-    let wire = build_wire_message(source, destination, "title", "content", Some(fields), &identity)
-        .expect("wire");
+    let wire = build_wire_message(
+        source,
+        destination,
+        "title",
+        "content",
+        Some(fields),
+        &identity,
+    )
+    .expect("wire");
     let message = decode_wire_message(&wire).expect("decode");
 
-    let fields = message.fields.and_then(|value| rmpv_to_json(&value)).expect("fields");
+    let fields = message
+        .fields
+        .and_then(|value| rmpv_to_json(&value))
+        .expect("fields");
     assert_eq!(
         fields["5"],
         serde_json::json!([["hex.bin", [10, 11, 12]], ["b64.bin", [1, 2, 3]]])
@@ -133,15 +153,22 @@ fn build_wire_message_skips_invalid_attachment_entries() {
         ],
     });
 
-    let wire = build_wire_message(source, destination, "title", "content", Some(fields), &identity)
-        .expect("wire");
+    let wire = build_wire_message(
+        source,
+        destination,
+        "title",
+        "content",
+        Some(fields),
+        &identity,
+    )
+    .expect("wire");
     let message = decode_wire_message(&wire).expect("decode");
 
-    let fields = message.fields.and_then(|value| rmpv_to_json(&value)).expect("fields");
-    assert_eq!(
-        fields["5"],
-        serde_json::json!([["good.bin", [1, 2, 3]]])
-    );
+    let fields = message
+        .fields
+        .and_then(|value| rmpv_to_json(&value))
+        .expect("fields");
+    assert_eq!(fields["5"], serde_json::json!([["good.bin", [1, 2, 3]]]));
 }
 
 #[test]
@@ -164,14 +191,21 @@ fn build_wire_message_uses_legacy_files_alias_when_field_5_invalid() {
         ],
     });
 
-    let wire = build_wire_message(source, destination, "title", "content", Some(fields), &identity)
-        .expect("wire");
+    let wire = build_wire_message(
+        source,
+        destination,
+        "title",
+        "content",
+        Some(fields),
+        &identity,
+    )
+    .expect("wire");
     let message = decode_wire_message(&wire).expect("decode");
 
-    let fields = message.fields.and_then(|value| rmpv_to_json(&value)).expect("fields");
-    assert_eq!(
-        fields["5"],
-        serde_json::json!([["good.bin", [1, 2, 3]]])
-    );
+    let fields = message
+        .fields
+        .and_then(|value| rmpv_to_json(&value))
+        .expect("fields");
+    assert_eq!(fields["5"], serde_json::json!([["good.bin", [1, 2, 3]]]));
     assert!(fields.get("files").is_none());
 }
