@@ -1,7 +1,7 @@
-use std::io::Cursor;
-
 use lxmf::error::LxmfError;
 use lxmf::message::Message;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use reticulum::identity::PrivateIdentity;
 use rmpv::Value;
 use serde_json::Value as JsonValue;
@@ -20,6 +20,8 @@ pub fn build_wire_message(
     message.set_title_from_string(title);
     message.set_content_from_string(content);
     if let Some(fields) = fields {
+        let mut fields = fields;
+        normalize_attachment_fields_for_wire(&mut fields);
         message.fields = Some(json_to_rmpv(&fields)?);
     }
     message.to_wire(Some(signer))
@@ -30,9 +32,154 @@ pub fn decode_wire_message(bytes: &[u8]) -> Result<Message, LxmfError> {
 }
 
 pub fn json_to_rmpv(value: &JsonValue) -> Result<Value, LxmfError> {
-    let encoded = rmp_serde::to_vec(value).map_err(|err| LxmfError::Encode(err.to_string()))?;
-    let mut cursor = Cursor::new(encoded);
-    rmpv::decode::read_value(&mut cursor).map_err(|err| LxmfError::Decode(err.to_string()))
+    json_to_rmpv_lossless(value)
+}
+
+fn normalize_attachment_fields_for_wire(fields: &mut JsonValue) {
+    let JsonValue::Object(map) = fields else {
+        return;
+    };
+
+    let normalized_field_5 = map
+        .get("5")
+        .and_then(JsonValue::as_array)
+        .and_then(normalize_file_attachments)
+        .or_else(|| map.get("attachments").and_then(JsonValue::as_array).and_then(normalize_file_attachments))
+        .or_else(|| map.get("files").and_then(JsonValue::as_array).and_then(normalize_file_attachments));
+    if let Some(value) = normalized_field_5 {
+        map.insert("5".to_string(), value);
+        map.remove("attachments");
+        map.remove("files");
+        return;
+    }
+
+    map.remove("5");
+}
+
+fn normalize_file_attachments(entries: &[JsonValue]) -> Option<JsonValue> {
+    let mut normalized = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(value) = normalize_file_attachment_entry(entry) {
+            normalized.push(value);
+        }
+    }
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(JsonValue::Array(normalized))
+    }
+}
+
+fn normalize_file_attachment_entry(entry: &JsonValue) -> Option<JsonValue> {
+    match entry {
+        JsonValue::Array(items) if items.len() >= 2 => {
+            let filename = items[0].as_str()?;
+            let data = normalize_attachment_data(&items[1])?;
+            Some(JsonValue::Array(vec![JsonValue::String(filename.to_string()), data]))
+        }
+        JsonValue::Object(map) => {
+            let filename = map.get("filename").or_else(|| map.get("name"))?.as_str()?;
+            let data = map.get("data").and_then(normalize_attachment_data)?;
+            Some(JsonValue::Array(vec![
+                JsonValue::String(filename.to_string()),
+                data,
+            ]))
+        }
+        _ => None,
+    }
+}
+
+fn normalize_attachment_data(value: &JsonValue) -> Option<JsonValue> {
+    let bytes = match value {
+        JsonValue::Array(items) => {
+            let mut normalized = Vec::with_capacity(items.len());
+            for item in items {
+                let byte = item.as_u64().and_then(|value| {
+                    if value <= u8::MAX as u64 {
+                        Some(value as u8)
+                    } else {
+                        None
+                    }
+                }).or_else(|| item.as_i64().and_then(|value| u8::try_from(value).ok()));
+                let Some(byte) = byte else {
+                    return None;
+                };
+                normalized.push(byte);
+            }
+            normalized
+        }
+        JsonValue::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                return None;
+            }
+            decode_hex_attachment_data(text).or_else(|| BASE64_STANDARD.decode(text).ok())?
+        }
+        _ => return None,
+    };
+
+    Some(JsonValue::Array(
+        bytes
+            .into_iter()
+            .map(|byte| JsonValue::Number(serde_json::Number::from(byte)))
+            .collect(),
+    ))
+}
+
+fn decode_hex_attachment_data(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 || !text.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(text.len() / 2);
+    let mut index = 0;
+    while index < text.len() {
+        bytes.push(u8::from_str_radix(&text[index..index + 2], 16).ok()?);
+        index += 2;
+    }
+    Some(bytes)
+}
+
+fn json_to_rmpv_lossless(value: &JsonValue) -> Result<Value, LxmfError> {
+    match value {
+        JsonValue::Null => Ok(Value::Nil),
+        JsonValue::Bool(value) => Ok(Value::Boolean(*value)),
+        JsonValue::Number(value) => {
+            if let Some(int) = value.as_i64() {
+                Ok(Value::Integer(int.into()))
+            } else if let Some(int) = value.as_u64() {
+                Ok(Value::Integer(int.into()))
+            } else if let Some(float) = value.as_f64() {
+                Ok(Value::F64(float))
+            } else {
+                Err(LxmfError::Encode("invalid number".to_string()))
+            }
+        }
+        JsonValue::String(value) => Ok(Value::String(value.into())),
+        JsonValue::Array(values) => {
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                out.push(json_to_rmpv_lossless(value)?);
+            }
+            Ok(Value::Array(out))
+        }
+        JsonValue::Object(map) => {
+            let mut out = Vec::with_capacity(map.len());
+            for (key, value) in map {
+                out.push((json_key_to_rmpv(key), json_to_rmpv_lossless(value)?));
+            }
+            Ok(Value::Map(out))
+        }
+    }
+}
+
+fn json_key_to_rmpv(key: &str) -> Value {
+    if let Ok(value) = key.parse::<i64>() {
+        Value::Integer(value.into())
+    } else if let Ok(value) = key.parse::<u64>() {
+        Value::Integer(value.into())
+    } else {
+        Value::String(key.into())
+    }
 }
 
 pub fn rmpv_to_json(value: &Value) -> Option<JsonValue> {
