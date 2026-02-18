@@ -50,7 +50,7 @@ serde_json = "1.0.140"
 serde_bytes = "0.11"
 hex = "0.4.3"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
-clap = { version = "4.5.29", features = ["derive"], optional = true }
+clap = { version = "4.5.59", features = ["derive"], optional = true }
 tempfile = { version = "3.19.1", optional = true }
 bzip2 = "0.4"
 
