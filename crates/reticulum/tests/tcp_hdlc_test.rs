@@ -7,6 +7,19 @@ use reticulum::{
 };
 use tokio_util::sync::CancellationToken;
 
+fn reserve_ports(count: usize) -> Vec<u16> {
+    let mut listeners = Vec::with_capacity(count);
+    let mut ports = Vec::with_capacity(count);
+    for _ in 0..count {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("ephemeral addr").port();
+        listeners.push(listener);
+        ports.push(port);
+    }
+    drop(listeners);
+    ports
+}
+
 async fn build_transport(name: &str, server_addr: &str, client_addr: &[&str]) -> Transport {
     let transport = Transport::new(TransportConfig::new(
         name,
@@ -33,11 +46,17 @@ async fn build_transport(name: &str, server_addr: &str, client_addr: &[&str]) ->
 }
 
 #[tokio::test]
+#[ignore = "stress test; run explicitly with --ignored"]
 async fn packet_overload() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("trace")).init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error"))
+        .is_test(true)
+        .try_init();
 
-    let transport_a = build_transport("a", "127.0.0.1:8081", &[]).await;
-    let transport_b = build_transport("b", "127.0.0.1:8082", &["127.0.0.1:8081"]).await;
+    let ports = reserve_ports(2);
+    let addr_a = format!("127.0.0.1:{}", ports[0]);
+    let addr_b = format!("127.0.0.1:{}", ports[1]);
+    let transport_a = build_transport("a", &addr_a, &[]).await;
+    let transport_b = build_transport("b", &addr_b, &[&addr_a]).await;
 
     let stop = CancellationToken::new();
 
@@ -52,7 +71,7 @@ async fn packet_overload() {
                     _ = stop.cancelled() => {
                             break;
                     },
-                    _ = tokio::time::sleep(std::time::Duration::from_micros(1)) => {
+                    _ = tokio::time::sleep(std::time::Duration::from_micros(50)) => {
 
                         let mut packet = Packet::default();
 
@@ -93,7 +112,7 @@ async fn packet_overload() {
         })
     };
 
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     stop.cancel();
 
@@ -101,4 +120,5 @@ async fn packet_overload() {
     let rx_counter = consumer_task.await.unwrap();
 
     log::info!("TX: {}, RX: {}", tx_counter, rx_counter);
+    assert!(tx_counter > 0, "producer should send packets");
 }

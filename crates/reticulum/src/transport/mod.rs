@@ -126,6 +126,10 @@ pub struct ReceivedData {
     pub destination: AddressHash,
     pub data: PacketDataBuffer,
     pub ratchet_used: bool,
+    pub context: Option<PacketContext>,
+    pub request_id: Option<[u8; 16]>,
+    pub hops: Option<u8>,
+    pub interface: Option<Vec<u8>>,
 }
 
 pub struct TransportConfig {
@@ -164,6 +168,9 @@ pub struct AnnounceEvent {
     pub destination: Arc<Mutex<SingleOutputDestination>>,
     pub app_data: PacketDataBuffer,
     pub ratchet: Option<[u8; crate::destination::RATCHET_LENGTH]>,
+    pub name_hash: [u8; crate::destination::NAME_HASH_LENGTH],
+    pub hops: u8,
+    pub interface: Vec<u8>,
 }
 
 pub(crate) struct TransportHandler {

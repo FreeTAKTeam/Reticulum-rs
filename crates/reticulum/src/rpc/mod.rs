@@ -50,13 +50,22 @@ pub struct DeliveryPolicy {
     pub prioritised_destinations: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
 pub struct PropagationState {
     pub enabled: bool,
     pub store_root: Option<String>,
     pub target_cost: u32,
     pub total_ingested: usize,
     pub last_ingest_count: usize,
+    pub sync_state: u32,
+    pub state_name: String,
+    pub sync_progress: f64,
+    pub messages_received: usize,
+    pub max_messages: usize,
+    pub selected_node: Option<String>,
+    pub last_sync_started: Option<i64>,
+    pub last_sync_completed: Option<i64>,
+    pub last_sync_error: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
@@ -101,11 +110,31 @@ pub struct RpcDaemon {
 }
 
 pub trait OutboundBridge: Send + Sync {
-    fn deliver(&self, record: &MessageRecord) -> Result<(), std::io::Error>;
+    fn deliver(
+        &self,
+        record: &MessageRecord,
+        options: &OutboundDeliveryOptions,
+    ) -> Result<(), std::io::Error>;
 }
 
 pub trait AnnounceBridge: Send + Sync {
     fn announce_now(&self) -> Result<(), std::io::Error>;
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct OutboundDeliveryOptions {
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub stamp_cost: Option<u32>,
+    #[serde(default)]
+    pub include_ticket: bool,
+    #[serde(default)]
+    pub try_propagation_on_fail: bool,
+    #[serde(default)]
+    pub ticket: Option<String>,
+    #[serde(default)]
+    pub source_private_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -137,6 +166,8 @@ struct SendMessageParams {
     title: String,
     content: String,
     fields: Option<JsonValue>,
+    #[serde(default)]
+    source_private_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +185,10 @@ struct SendMessageV2Params {
     stamp_cost: Option<u32>,
     #[serde(default)]
     include_ticket: Option<bool>,
+    #[serde(default)]
+    try_propagation_on_fail: Option<bool>,
+    #[serde(default)]
+    source_private_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,14 +405,21 @@ fn parse_capabilities_from_app_data_hex(app_data_hex: Option<&str>) -> Vec<Strin
     let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(&app_data) else {
         return Vec::new();
     };
-    let Some(entries) = value.as_array() else {
-        return Vec::new();
-    };
-    if entries.len() < 3 {
-        return Vec::new();
+    let mut capabilities = Vec::new();
+    if let Some(entries) = value.as_array() {
+        if entries.len() >= 3 && entries[2].as_bool() == Some(true) {
+            capabilities.push("propagation".to_string());
+        }
+        for entry in entries {
+            if let Some(parsed) = extract_capabilities_from_json(entry) {
+                capabilities.extend(parsed);
+            }
+        }
+    } else if let Some(parsed) = extract_capabilities_from_json(&value) {
+        capabilities.extend(parsed);
     }
 
-    extract_capabilities_from_json(&entries[2]).unwrap_or_default()
+    normalize_capabilities(capabilities)
 }
 
 fn extract_capabilities_from_json(value: &serde_json::Value) -> Option<Vec<String>> {

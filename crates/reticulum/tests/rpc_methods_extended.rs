@@ -363,6 +363,50 @@ fn propagation_node_selection_roundtrip() {
 }
 
 #[test]
+fn list_propagation_nodes_only_returns_propagation_nodes() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 20,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-chat",
+                "timestamp": 200,
+                "capabilities": ["attachments", "commands"],
+            })),
+        })
+        .expect("announce_received");
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 21,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-propagation",
+                "timestamp": 201,
+                "capabilities": ["propagation", "commands"],
+            })),
+        })
+        .expect("announce_received");
+
+    let listed = daemon
+        .handle_rpc(RpcRequest {
+            id: 22,
+            method: "list_propagation_nodes".into(),
+            params: None,
+        })
+        .expect("list_propagation_nodes");
+    let listed_result = listed.result.expect("result");
+    let nodes = listed_result
+        .get("nodes")
+        .and_then(|value| value.as_array())
+        .expect("nodes");
+    assert!(nodes
+        .iter()
+        .any(|entry| entry["peer"] == "relay-propagation" && entry["capabilities"].is_array()));
+    assert!(!nodes.iter().any(|entry| entry["peer"] == "relay-chat"));
+}
+
+#[test]
 fn message_delivery_trace_records_transitions() {
     let daemon = RpcDaemon::test_instance();
     daemon

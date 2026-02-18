@@ -247,6 +247,37 @@ fn announce_capabilities_can_be_derived_from_app_data_hex() {
 }
 
 #[test]
+fn announce_capabilities_can_be_derived_from_pn_app_data() {
+    let daemon = RpcDaemon::test_instance();
+    let app_data = rmp_serde::to_vec(&json!([
+        "node name",
+        1_700_000_321,
+        true,
+        10,
+        20,
+        [40, 50, 60],
+        { "1": "Node Name" }
+    ]))
+    .expect("encode app data");
+
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 1,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "relay-pn",
+                "timestamp": 700,
+                "app_data_hex": hex::encode(app_data),
+            })),
+        })
+        .expect("announce_received");
+
+    let event = daemon.take_event().expect("announce event");
+    assert_eq!(event.payload["peer"], "relay-pn");
+    assert_eq!(event.payload["capabilities"], json!(["propagation"]));
+}
+
+#[test]
 fn list_announces_applies_limit_and_before_ts() {
     let daemon = RpcDaemon::test_instance();
     for (id, (peer, timestamp)) in [

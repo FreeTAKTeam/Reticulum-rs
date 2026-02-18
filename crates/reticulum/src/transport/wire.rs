@@ -332,6 +332,20 @@ pub(super) async fn handle_data<'a>(
                     destination: packet.destination,
                     data: buffer,
                     ratchet_used,
+                    context: Some(packet.context),
+                    request_id: if matches!(
+                        packet.context,
+                        PacketContext::Request | PacketContext::Response
+                    ) {
+                        let hash = packet.hash().to_bytes();
+                        let mut request_id = [0u8; 16];
+                        request_id.copy_from_slice(&hash[..16]);
+                        Some(request_id)
+                    } else {
+                        None
+                    },
+                    hops: Some(packet.header.hops),
+                    interface: packet.transport.map(|value| value.as_slice().to_vec()),
                 })
                 .ok();
         } else {

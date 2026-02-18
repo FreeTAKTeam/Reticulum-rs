@@ -99,6 +99,10 @@ impl Transport {
                                     destination: event.address_hash,
                                     data: PacketDataBuffer::new_from_slice(payload.as_slice()),
                                     ratchet_used: false,
+                                    context: Some(payload.context()),
+                                    request_id: payload.request_id(),
+                                    hops: None,
+                                    interface: None,
                                 });
                             }
                         }

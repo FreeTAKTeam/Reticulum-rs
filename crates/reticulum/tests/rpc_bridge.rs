@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use reticulum::rpc::{OutboundBridge, RpcDaemon, RpcRequest};
+use reticulum::rpc::{OutboundBridge, OutboundDeliveryOptions, RpcDaemon, RpcRequest};
 use serde_json::json;
 
 struct TestBridge {
@@ -11,6 +11,7 @@ impl OutboundBridge for TestBridge {
     fn deliver(
         &self,
         _record: &reticulum::storage::messages::MessageRecord,
+        _options: &OutboundDeliveryOptions,
     ) -> Result<(), std::io::Error> {
         let mut guard = self.calls.lock().expect("calls");
         *guard += 1;
@@ -24,6 +25,7 @@ impl OutboundBridge for FailingBridge {
     fn deliver(
         &self,
         _record: &reticulum::storage::messages::MessageRecord,
+        _options: &OutboundDeliveryOptions,
     ) -> Result<(), std::io::Error> {
         Err(std::io::Error::other("simulated failure"))
     }
