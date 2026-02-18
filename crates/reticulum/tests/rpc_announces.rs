@@ -278,6 +278,78 @@ fn announce_capabilities_can_be_derived_from_pn_app_data() {
 }
 
 #[test]
+fn announce_received_exposes_stamp_cost_flexibility_and_peering_cost() {
+    let daemon = RpcDaemon::test_instance();
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 1,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "peer-costs",
+                "timestamp": 1000,
+                "stamp_cost_flexibility": 4,
+                "peering_cost": 12,
+            })),
+        })
+        .expect("announce_received");
+
+    let event = daemon.take_event().expect("announce event");
+    assert_eq!(event.payload["peer"], "peer-costs");
+    assert_eq!(event.payload["stamp_cost_flexibility"], 4);
+    assert_eq!(event.payload["peering_cost"], 12);
+
+    let announces = daemon
+        .handle_rpc(RpcRequest {
+            id: 2,
+            method: "list_announces".into(),
+            params: None,
+        })
+        .expect("list_announces")
+        .result
+        .expect("result")
+        .get("announces")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .expect("announce list");
+
+    assert_eq!(announces[0]["peer"], "peer-costs");
+    assert_eq!(announces[0]["stamp_cost_flexibility"], 4);
+    assert_eq!(announces[0]["peering_cost"], 12);
+}
+
+#[test]
+fn announce_received_falls_back_to_costs_from_pn_app_data() {
+    let daemon = RpcDaemon::test_instance();
+    let app_data = rmp_serde::to_vec(&json!([
+        false,
+        1_700_000_321,
+        true,
+        10,
+        20,
+        [40, 4, 9],
+        { "name": "Node Name" }
+    ]))
+    .expect("encode app data");
+
+    daemon
+        .handle_rpc(RpcRequest {
+            id: 1,
+            method: "announce_received".into(),
+            params: Some(json!({
+                "peer": "peer-costs-fallback",
+                "timestamp": 1200,
+                "app_data_hex": hex::encode(app_data),
+            })),
+        })
+        .expect("announce_received");
+
+    let event = daemon.take_event().expect("announce event");
+    assert_eq!(event.payload["peer"], "peer-costs-fallback");
+    assert_eq!(event.payload["stamp_cost_flexibility"], 4);
+    assert_eq!(event.payload["peering_cost"], 9);
+}
+
+#[test]
 fn list_announces_applies_limit_and_before_ts() {
     let daemon = RpcDaemon::test_instance();
     for (id, (peer, timestamp)) in [
