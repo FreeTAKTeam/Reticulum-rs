@@ -156,7 +156,7 @@ impl RpcDaemon {
     pub fn accept_announce(&self, peer: String, timestamp: i64) -> Result<(), std::io::Error> {
         self.accept_announce_with_metadata(
             peer, timestamp, None, None, None, None, None, None, None, None, None, None, None,
-            None, None, None, None,
+            None, None, None, None, None,
         )
     }
 
@@ -185,6 +185,7 @@ impl RpcDaemon {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -200,8 +201,9 @@ impl RpcDaemon {
         rssi: Option<f64>,
         snr: Option<f64>,
         q: Option<f64>,
-        stamp_cost_flexibility: Option<u32>,
-        peering_cost: Option<u32>,
+        stamp_cost: Option<u32>,
+        stamp_cost_flexibility: Option<Option<u32>>,
+        peering_cost: Option<Option<u32>>,
         aspect: Option<String>,
         hops: Option<u32>,
         interface: Option<String>,
@@ -209,6 +211,9 @@ impl RpcDaemon {
         source_identity: Option<String>,
         source_node: Option<String>,
     ) -> Result<(), std::io::Error> {
+        let _ = stamp_cost;
+        let stamp_cost_flexibility = stamp_cost_flexibility.flatten();
+        let peering_cost = peering_cost.flatten();
         let record = self.upsert_peer(peer, timestamp, name, name_source);
         let capability_list = if let Some(caps) = capabilities {
             normalize_capabilities(caps)
@@ -1120,8 +1125,9 @@ impl RpcDaemon {
                     parsed.rssi,
                     parsed.snr,
                     parsed.q,
-                    stamp_cost_flexibility,
-                    peering_cost,
+                    None,
+                    Some(stamp_cost_flexibility),
+                    Some(peering_cost),
                     None,
                     None,
                     None,
