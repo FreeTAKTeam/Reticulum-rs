@@ -43,16 +43,16 @@ fn normalize_attachment_fields_for_wire(fields: &mut JsonValue) {
     let normalized_field_5 = map
         .get("5")
         .and_then(JsonValue::as_array)
-        .and_then(normalize_file_attachments)
+        .and_then(|entries| normalize_file_attachments(entries))
         .or_else(|| {
             map.get("attachments")
                 .and_then(JsonValue::as_array)
-                .and_then(normalize_file_attachments)
+                .and_then(|entries| normalize_file_attachments(entries))
         })
         .or_else(|| {
             map.get("files")
                 .and_then(JsonValue::as_array)
-                .and_then(normalize_file_attachments)
+                .and_then(|entries| normalize_file_attachments(entries))
         });
     if let Some(value) = normalized_field_5 {
         map.insert("5".to_string(), value);
@@ -122,13 +122,7 @@ fn normalize_attachment_data(value: &JsonValue) -> Option<JsonValue> {
             }
             normalized
         }
-        JsonValue::String(text) => {
-            let text = text.trim();
-            if text.is_empty() {
-                return None;
-            }
-            decode_hex_attachment_data(text).or_else(|| BASE64_STANDARD.decode(text).ok())?
-        }
+        JsonValue::String(text) => decode_attachment_text_data(text)?,
         _ => return None,
     };
 
@@ -153,6 +147,36 @@ fn decode_hex_attachment_data(text: &str) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+fn decode_attachment_text_data(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    if let Some(payload) = text
+        .strip_prefix("hex:")
+        .or_else(|| text.strip_prefix("HEX:"))
+    {
+        return decode_hex_attachment_data(payload.trim());
+    }
+
+    if let Some(payload) = text
+        .strip_prefix("base64:")
+        .or_else(|| text.strip_prefix("BASE64:"))
+    {
+        return BASE64_STANDARD.decode(payload.trim()).ok();
+    }
+
+    let hex = decode_hex_attachment_data(text);
+    let base64 = BASE64_STANDARD.decode(text).ok();
+    match (hex, base64) {
+        (Some(bytes), None) => Some(bytes),
+        (None, Some(bytes)) => Some(bytes),
+        (Some(_), Some(_)) => None,
+        (None, None) => None,
+    }
+}
+
 fn json_to_rmpv_lossless(value: &JsonValue) -> Result<Value, LxmfError> {
     match value {
         JsonValue::Null => Ok(Value::Nil),
@@ -168,7 +192,7 @@ fn json_to_rmpv_lossless(value: &JsonValue) -> Result<Value, LxmfError> {
                 Err(LxmfError::Encode("invalid number".to_string()))
             }
         }
-        JsonValue::String(value) => Ok(Value::String(value.into())),
+        JsonValue::String(value) => Ok(Value::String(value.as_str().into())),
         JsonValue::Array(values) => {
             let mut out = Vec::with_capacity(values.len());
             for value in values {
@@ -187,13 +211,34 @@ fn json_to_rmpv_lossless(value: &JsonValue) -> Result<Value, LxmfError> {
 }
 
 fn json_key_to_rmpv(key: &str) -> Value {
-    if let Ok(value) = key.parse::<i64>() {
-        Value::Integer(value.into())
-    } else if let Ok(value) = key.parse::<u64>() {
-        Value::Integer(value.into())
-    } else {
-        Value::String(key.into())
+    if is_canonical_signed_integer_key(key) {
+        if let Ok(value) = key.parse::<i64>() {
+            return Value::Integer(value.into());
+        }
     }
+    if is_canonical_unsigned_integer_key(key) {
+        if let Ok(value) = key.parse::<u64>() {
+            return Value::Integer(value.into());
+        }
+    }
+    Value::String(key.into())
+}
+
+fn is_canonical_unsigned_integer_key(key: &str) -> bool {
+    if key.is_empty() || !key.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    key == "0" || !key.starts_with('0')
+}
+
+fn is_canonical_signed_integer_key(key: &str) -> bool {
+    let Some(rest) = key.strip_prefix('-') else {
+        return false;
+    };
+    if rest.is_empty() || !rest.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    rest != "0" && !rest.starts_with('0')
 }
 
 pub fn rmpv_to_json(value: &Value) -> Option<JsonValue> {

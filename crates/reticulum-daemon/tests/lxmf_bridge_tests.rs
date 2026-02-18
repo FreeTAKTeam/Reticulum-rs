@@ -38,6 +38,19 @@ fn json_to_rmpv_roundtrip() {
 }
 
 #[test]
+fn json_to_rmpv_preserves_noncanonical_numeric_keys() {
+    let input = serde_json::json!({
+        "1": "canonical-int",
+        "01": "leading-zero",
+        "+1": "plus-prefixed",
+        "-01": "noncanonical-negative",
+    });
+    let value = json_to_rmpv(&input).expect("to rmpv");
+    let output = rmpv_to_json(&value).expect("to json");
+    assert_eq!(output, input);
+}
+
+#[test]
 fn build_wire_message_normalizes_attachment_object_metadata() {
     let identity = PrivateIdentity::new_from_name("attachment-normalization");
     let mut source = [0u8; 16];
@@ -127,6 +140,47 @@ fn build_wire_message_normalizes_hex_and_base64_attachment_data() {
     assert_eq!(
         fields["5"],
         serde_json::json!([["hex.bin", [10, 11, 12]], ["b64.bin", [1, 2, 3]]])
+    );
+}
+
+#[test]
+fn build_wire_message_rejects_ambiguous_attachment_strings_without_prefix() {
+    let identity = PrivateIdentity::new_from_name("ambiguous-string-normalization");
+    let mut source = [0u8; 16];
+    source.copy_from_slice(identity.address_hash().as_slice());
+    let destination = [0x45u8; 16];
+
+    let fields = serde_json::json!({
+        "5": [
+            {
+                "filename": "ambiguous.bin",
+                "data": "deadbeef",
+            },
+            {
+                "filename": "explicit-hex.bin",
+                "data": "hex:deadbeef",
+            },
+        ],
+    });
+
+    let wire = build_wire_message(
+        source,
+        destination,
+        "title",
+        "content",
+        Some(fields),
+        &identity,
+    )
+    .expect("wire");
+    let message = decode_wire_message(&wire).expect("decode");
+
+    let fields = message
+        .fields
+        .and_then(|value| rmpv_to_json(&value))
+        .expect("fields");
+    assert_eq!(
+        fields["5"],
+        serde_json::json!([["explicit-hex.bin", [222, 173, 190, 239]]])
     );
 }
 
