@@ -901,6 +901,10 @@ impl RpcDaemon {
                     .map_err(std::io::Error::other)?;
                 let mut by_peer: HashMap<String, PropagationNodeRecord> = HashMap::new();
                 for announce in announces {
+                    if !announce.capabilities.iter().any(|cap| cap == "propagation") {
+                        continue;
+                    }
+
                     let key = announce.peer.clone();
                     let entry =
                         by_peer

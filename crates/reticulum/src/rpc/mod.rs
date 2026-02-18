@@ -405,14 +405,21 @@ fn parse_capabilities_from_app_data_hex(app_data_hex: Option<&str>) -> Vec<Strin
     let Ok(value) = rmp_serde::from_slice::<serde_json::Value>(&app_data) else {
         return Vec::new();
     };
-    let Some(entries) = value.as_array() else {
-        return Vec::new();
-    };
-    if entries.len() < 3 {
-        return Vec::new();
+    let mut capabilities = Vec::new();
+    if let Some(entries) = value.as_array() {
+        if entries.len() >= 3 && entries[2].as_bool() == Some(true) {
+            capabilities.push("propagation".to_string());
+        }
+        for entry in entries {
+            if let Some(parsed) = extract_capabilities_from_json(entry) {
+                capabilities.extend(parsed);
+            }
+        }
+    } else if let Some(parsed) = extract_capabilities_from_json(&value) {
+        capabilities.extend(parsed);
     }
 
-    extract_capabilities_from_json(&entries[2]).unwrap_or_default()
+    normalize_capabilities(capabilities)
 }
 
 fn extract_capabilities_from_json(value: &serde_json::Value) -> Option<Vec<String>> {
