@@ -24,7 +24,7 @@ name = "reticulum"
 [dependencies]
 
 # Crypto
-crypto-common = { version = "0.1.6", features = ["rand_core"] }
+crypto-common = { version = "0.2.0", features = ["rand_core"] }
 aes = "0.8.4"
 cbc = "0.1.2"
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
